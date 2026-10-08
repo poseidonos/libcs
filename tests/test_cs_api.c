@@ -14,6 +14,7 @@
 #include <assert.h>
 
 #include "cs_api.h"
+#include "cs_internal.h"
 
 #define CSF_ID_SUM64 2U
 #define CSF_ID_MAX64 3U
@@ -1463,12 +1464,12 @@ test_query_library_support(void)
 static void
 test_deregister_nonexistent_plugin(void)
 {
-	TEST_START("csDeregisterPlugin nonexistent");
+	TEST_START("cs_backend_unregister nonexistent");
 
 	csStatus status = csInit();
 	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csInit failed");
 
-	status = csDeregisterPlugin("nonexistent_backend");
+	status = cs_backend_unregister("nonexistent_backend");
 	ASSERT_EQ(CS_STATUS_ERROR_NOT_FOUND, status, "expected NOT_FOUND");
 
 	csShutdown();
