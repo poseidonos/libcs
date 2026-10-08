@@ -878,34 +878,6 @@ typedef struct {
  */
 csStatus csQueryLibrarySupport(csLibrarySupport *support);
 
-/**
- * Register a backend plugin with the library
- *
- * @param[in] ops  Backend operations vtable (see cs_backend.h)
- *
- * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_ALREADY_EXISTS if a
- *         backend with the same name is already registered, or error code
- *
- * @deprecated Superseded by cs_backend_register() (cs_backend.h); the two APIs
- *             share one registry. This entry point will be removed in the next
- *             major release.
- */
-struct cs_backend_ops;
-csStatus csRegisterPlugin(const struct cs_backend_ops *ops);
-
-/**
- * Deregister a backend plugin by name
- *
- * @param[in] name  Backend name to remove
- *
- * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_NOT_FOUND if no
- *         backend with that name is registered, or error code
- *
- * @deprecated Superseded by cs_backend_unregister(); will be removed in the
- *             next major release.
- */
-csStatus csDeregisterPlugin(const char *name);
-
 typedef void (*csNotifyCallback)(uint32_t event_type, void *user_data);
 
 /**
