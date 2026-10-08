@@ -1,0 +1,27 @@
+option(
+  'sim_backend',
+  type: 'boolean',
+  value: true,
+  description: 'Enable in-process simulator backend'
+)
+
+option(
+  'ioctl_backend',
+  type: 'boolean',
+  value: false,
+  description: 'Enable Linux NVMe ioctl passthrough backend (no external deps, synchronous)'
+)
+
+option(
+  'io_uring_backend',
+  type: 'boolean',
+  value: false,
+  description: 'Enable Linux io_uring async NVMe passthrough backend (requires liburing, Linux 5.19+)'
+)
+
+option(
+  'libnvme_backend',
+  type: 'boolean',
+  value: false,
+  description: 'Enable libnvme passthrough backend (requires libnvme, supports NVMe-oF)'
+)

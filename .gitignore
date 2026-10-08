@@ -1,0 +1,7 @@
+build/
+.cache/
+benchmark_results/
+.DS_Store
+*.o
+*.a
+*.so
