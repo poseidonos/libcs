@@ -110,11 +110,21 @@ inc_dirs = include_directories('include', 'src')
 # Library sources
 lib_sources = [
   'src/cs_api.c',
+  'src/cs_api_device.c',
+  'src/cs_api_program.c',
+  'src/cs_api_compute.c',
   'src/cs_helpers.c',
+  'src/cs_helpers_cached.c',
+  'src/cs_backend_helpers.c',
 ]
 
 if xnvme_dep.found()
-  lib_sources += ['src/backend_xnvme.c']
+  lib_sources += [
+    'src/backend_xnvme.c',
+    'src/backend_xnvme_slm.c',
+    'src/backend_xnvme_compute.c',
+    'src/backend_xnvme_misc.c',
+  ]
 endif
 
 if get_option('sim_backend')
@@ -192,7 +202,7 @@ test_sources = [
 test_exe = executable(
   'test_cs_api',
   test_sources,
-  include_directories: include_directories('include'),
+  include_directories: include_directories('include', 'src'),
   link_with: libcs,
   dependencies: [thread_dep],
   install: false,
