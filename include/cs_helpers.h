@@ -19,10 +19,11 @@
 extern "C" {
 #endif
 
+/** Result metadata returned by the csRunComputeEx family */
 typedef struct {
-	csStatus status;
-	size_t bytes_produced;
-	uint32_t elements_produced;
+	csStatus status;              /**< Status of the compute execution */
+	size_t bytes_produced;        /**< Bytes written to the output buffer */
+	uint32_t elements_produced;   /**< Elements produced by the CSF */
 } csComputeResult;
 
 /**
@@ -79,28 +80,116 @@ typedef struct {
  * Keep the typedef so call sites compile without changes. */
 typedef uint32_t csBuiltinCSF;
 
+/**
+ * Execute a CSF in one call: open the device, run, and close it.
+ *
+ * @param[in] uri          Device URI
+ * @param[in] csf_id       CSF to execute
+ * @param[in] input       Input data
+ * @param[in] input_size   Input size in bytes
+ * @param[out] output     Output buffer
+ * @param[in] output_size Output buffer size in bytes
+ * @param[in] args        CSF-specific arguments (may be NULL)
+ * @param[in] args_size    Arguments size in bytes
+ *
+ * @return CS_STATUS_SUCCESS on success, or error code
+ */
 csStatus csRunCompute(const char *uri, csCSFId csf_id,
 			      const void *input, size_t input_size,
 			      void *output, size_t output_size,
 			      const void *args, size_t args_size);
 
+/**
+ * Like csRunCompute, but also returns result metadata.
+ *
+ * @param[in] uri          Device URI
+ * @param[in] csf_id       CSF to execute
+ * @param[in] input        Input data
+ * @param[in] input_size   Input size in bytes
+ * @param[out] output      Output buffer
+ * @param[in] output_size  Output buffer size in bytes
+ * @param[in] args         CSF-specific arguments (may be NULL)
+ * @param[in] args_size    Arguments size in bytes
+ * @param[out] result      Result metadata (may be NULL)
+ *
+ * @return CS_STATUS_SUCCESS on success, or error code
+ */
 csStatus csRunComputeEx(const char *uri, csCSFId csf_id,
 			const void *input, size_t input_size,
 			void *output, size_t output_size,
 			const void *args, size_t args_size,
 			csComputeResult *result);
 
+/**
+ * Execute a compute request asynchronously and wait up to timeout_ms.
+ *
+ * @param[in] device      Open device handle
+ * @param[in] desc        Compute request descriptor
+ * @param[in] timeout_ms  Max time to wait (0 = infinite)
+ * @param[out] result     Result metadata (may be NULL)
+ *
+ * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_TIMEOUT on timeout,
+ *         or error code
+ */
 csStatus csRunComputeAsync(csCSxHandle device, const csComputeDesc *desc,
 			   uint32_t timeout_ms, csComputeResult *result);
 
+/**
+ * Open a device and initialize a scope for automatic cleanup.
+ *
+ * @param[out] scope  Scope to initialize
+ * @param[in]  uri    Device URI
+ *
+ * @return CS_STATUS_SUCCESS on success, or error code
+ */
 csStatus csScopeOpen(csScope *scope, const char *uri);
+
+/**
+ * Allocate memory tracked by a scope; freed by csScopeClose().
+ *
+ * @param[in]  scope      Scope from csScopeOpen()
+ * @param[in]  size       Size in bytes
+ * @param[out] out_handle Returned memory handle (may be NULL)
+ *
+ * @return Host pointer, or NULL on failure
+ */
 void *csScopeAllocMem(csScope *scope, size_t size, csMemHandle *out_handle);
+
+/**
+ * Free all memory and events tracked by the scope and close the device.
+ *
+ * @param[in,out] scope  Scope to tear down; safe on a zero-initialized scope
+ */
 void csScopeClose(csScope *scope);
 
+/**
+ * Initialize a csComputeDesc for a simple request without arguments.
+ *
+ * @param[in] csf_id       CSF to execute
+ * @param[in] input        Input data
+ * @param[in] input_size   Input size in bytes
+ * @param[out] output      Output buffer
+ * @param[in] output_size  Output buffer size in bytes
+ *
+ * @return Initialized compute descriptor
+ */
 csComputeDesc csMakeComputeDesc(csCSFId csf_id,
 				const void *input, size_t input_size,
 				void *output, size_t output_size);
 
+/**
+ * Initialize a csComputeDesc with an arguments buffer.
+ *
+ * @param[in] csf_id       CSF to execute
+ * @param[in] input        Input data
+ * @param[in] input_size   Input size in bytes
+ * @param[out] output      Output buffer
+ * @param[in] output_size  Output buffer size in bytes
+ * @param[in] args         CSF-specific arguments
+ * @param[in] args_size    Arguments size in bytes
+ *
+ * @return Initialized compute descriptor
+ */
 csComputeDesc csMakeComputeDescArgs(csCSFId csf_id,
 				    const void *input, size_t input_size,
 				    void *output, size_t output_size,
@@ -121,6 +210,12 @@ csStatus csRunComputeExCached(const char *uri, csCSFId csf_id,
 			      const void *args, size_t args_size,
 			      csComputeResult *result);
 
+/**
+ * Release all per-thread cached resources opened by csRunComputeExCached()
+ * on the calling thread.
+ *
+ * Call at thread exit or teardown; a no-op if nothing is cached.
+ */
 void csRunComputeExCachedCleanup(void);
 
 /**

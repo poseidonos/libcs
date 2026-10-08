@@ -72,7 +72,7 @@ struct cs_backend_ctx {
 	size_t   rb_dma_len;            /**< Allocated size of @rb_dma, 0 if
 					  *  none. */
 	uint32_t nsid;                  /**< Namespace ID (NVM, for device ops) */
-	uint32_t libcs_nsid;             /**< CPCS Namespace ID (for compute cmds) */
+	uint32_t libcs_nsid;             	/**< Compute Namespace ID (for compute cmds) */
 	uint32_t slm_nsid;              /**< SLM Namespace ID (for staging) */
 	uint32_t lba_nbytes;            /**< NVM LBA size in bytes */
 	uint16_t mrs_rsid;              /**< Current MRS resource ID (0=none) */
@@ -97,7 +97,8 @@ struct cs_backend_ctx {
  * xNVMe backend state
  */
 static struct {
-	bool initialized;
+	bool initialized;  /* backend init flag: written by xnvme_backend_init/shutdown
+	                   * (under the library init_lock), read as re-entry guard */
 } xnvme_state = { .initialized = false };
 
 /**
@@ -249,14 +250,14 @@ xnvme_backend_dev_open(const char *uri, struct cs_backend_ctx **backend_ctx)
 		ctx->opts.adrfam = adrfam;
 	}
 	/*
-	 * LIBCS_XNVME_NSID = CPCS namespace (for compute commands, e.g. 2).
+	 * LIBCS_XNVME_NSID = compute namespace (for compute commands, e.g. 2).
 	 * LIBCS_XNVME_NVM_NSID = NVM namespace to open the device with (default 1).
 	 *
 	 * xnvme_dev_open() must be called with a standard NVM namespace because
-	 * CPCS namespaces don't support Identify Namespace and cause ENXIO.
-	 * The CPCS nsid is stored separately and used only in CP execute calls.
+	 * Compute namespaces don't support Identify Namespace and cause ENXIO.
+	 * The compute nsid is stored separately and used only in CP execute calls.
 	 */
-	uint32_t libcs_nsid = 2; /* default CPCS namespace */
+	uint32_t libcs_nsid = 2; /* default compute namespace */
 	{
 		const char *nsid_env = getenv("LIBCS_XNVME_NSID");
 		if (nsid_env && nsid_env[0] != '\0') {

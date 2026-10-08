@@ -33,30 +33,7 @@ struct sim_multi_agg64_result {
 	double max;
 };
 
-/* Test result counters */
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-#define TEST_START(name) \
-	printf("  %-50s ", name); \
-	fflush(stdout)
-
-#define TEST_PASS() \
-	do { \
-		printf("[PASS]\n"); \
-		tests_passed++; \
-	} while (0)
-
-#define TEST_FAIL(msg) \
-	do { \
-		printf("[FAIL] %s\n", msg); \
-		tests_failed++; \
-	} while (0)
-
-#define TEST_SKIP(msg) \
-	do { \
-		printf("[SKIP] %s\n", msg); \
-	} while (0)
+#include "test_util.h"
 
 #define ASSERT_EQ(expected, actual, msg) \
 	do { \
@@ -1680,10 +1657,7 @@ main(int argc, char *argv[])
 	test_csf_id();
 	test_compute_sync();
 
-	printf("\n");
-	printf("===========================================\n");
-	printf("  Results: %d passed, %d failed\n", tests_passed, tests_failed);
-	printf("===========================================\n\n");
+	TEST_SUMMARY();
 
-	return tests_failed > 0 ? 1 : 0;
+	return TEST_EXIT();
 }

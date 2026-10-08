@@ -22,6 +22,12 @@
  *   LD_LIBRARY_PATH=libcs/build:xnvme/build/lib \
  *   ./bench_compute_from_nvm --uri 192.0.2.1:4420 \
  *     --csf SUM64 --len 1048576 --iterations 5 --warmup 1
+ *
+ * Timing-window parity (AGENTS.md §5.1) — what elapsed_ms includes per iteration:
+ *   nvm_to_slm measures:  NVM→SLM device copy + MRS create/execute + D2H result (every iteration)
+ *   h2d measures:         host→SLM (H2D) copy + MRS execute + D2H result (every iteration)
+ *   nvm_cached measures:  MRS execute + D2H result only (H2D skipped after warmup — staged
+ *                         pattern; NOT a fair speedup vs h2d/nvm_to_slm, label as staged)
  */
 
 #include <stdint.h>

@@ -8,6 +8,14 @@
  *
  * This header defines the public interface for the CS API Host Library,
  * which provides a standardized interface for computational storage operations.
+ *
+ * @par Thread safety
+ * All API entry points are thread-safe: per-device work is serialized by a
+ * per-device mutex, and the library/device/event tables are protected by
+ * global mutexes. The library is initialized lazily (cs_ensure_init) on
+ * first use, so csInit() needs no explicit ordering with other calls.
+ * csShutdown() is process-global and force-closes still-open handles —
+ * call it only after all other threads have stopped using the library.
  */
 
 #ifndef CS_API_H
@@ -266,6 +274,13 @@ csStatus csFreeMem(csCSxHandle csx_handle, csMemHandle mem_handle);
 csStatus csInitMem(csCSxHandle csx_handle, csMemHandle mem_handle,
 		   uint8_t fill_value, size_t size);
 
+/** Memory allocation statistics for a device */
+typedef struct {
+	uint32_t allocation_count;     /**< Current allocation count */
+	uint32_t max_allocations;      /**< Maximum supported allocations */
+	size_t total_allocated_bytes;  /**< Total allocated bytes */
+} csMemInfo;
+
 /**
  * Query memory allocation statistics for a device
  *
@@ -274,12 +289,6 @@ csStatus csInitMem(csCSxHandle csx_handle, csMemHandle mem_handle,
  *
  * @return CS_STATUS_SUCCESS on success, or error code
  */
-typedef struct {
-	uint32_t allocation_count;     /**< Current allocation count */
-	uint32_t max_allocations;      /**< Maximum supported allocations */
-	size_t total_allocated_bytes;  /**< Total allocated bytes */
-} csMemInfo;
-
 csStatus csGetMemInfo(csCSxHandle csx_handle, csMemInfo *info);
 
 /** @} */
@@ -494,16 +503,61 @@ typedef enum {
 	CS_BATCH_MODE_HYBRID     = 2,
 } csBatchMode;
 
+/**
+ * Allocate a batch request container
+ *
+ * @param[in] csx_handle    CSx device handle
+ * @param[in] mode          Batch execution mode (serialized/parallel/hybrid)
+ * @param[in] max_entries   Capacity hint for entries
+ * @param[out] batch        Returned batch handle
+ *
+ * @return CS_STATUS_SUCCESS on success, or error code
+ */
 csStatus csAllocBatchRequest(csCSxHandle csx_handle, csBatchMode mode,
 			     uint32_t max_entries, csBatchHandle *batch);
 
+/**
+ * Append one request to a batch
+ *
+ * @param[in] batch         Batch handle from csAllocBatchRequest()
+ * @param[in] entry          Request descriptor to append
+ *
+ * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_LIMIT when the
+ *         batch is full, or error code
+ */
 csStatus csAddBatchEntry(csBatchHandle batch, const csRequest *entry);
 
+/**
+ * Replace an existing batch entry in place
+ *
+ * @param[in] batch         Batch handle from csAllocBatchRequest()
+ * @param[in] entry_index   Zero-based index of the entry to replace
+ * @param[in] new_entry     Replacement request descriptor
+ *
+ * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_INVALID_PARAM when
+ *         the index is out of range, or error code
+ */
 csStatus csHelperReconfigureBatchEntry(csBatchHandle batch, uint32_t entry_index,
 				       const csRequest *new_entry);
 
+/**
+ * Change the capacity of a batch request
+ *
+ * @param[in] batch         Batch handle from csAllocBatchRequest()
+ * @param[in] new_size      New capacity in entries
+ *
+ * @return CS_STATUS_SUCCESS on success, or error code
+ */
 csStatus csHelperResizeBatchRequest(csBatchHandle batch, uint32_t new_size);
 
+/**
+ * Release a batch request container
+ *
+ * @param[in] csx_handle    CSx device handle
+ * @param[in] batch         Batch handle to free
+ *
+ * @return CS_STATUS_SUCCESS on success, or error code
+ */
 csStatus csFreeBatchRequest(csCSxHandle csx_handle, csBatchHandle batch);
 
 /**
@@ -662,7 +716,11 @@ csStatus csInit(void);
  *
  * @return CS_STATUS_SUCCESS on success, or error code
  *
- * @note All handles must be closed before calling this function
+ * @note All handles should be closed before calling this function. Any
+ *       device handle still open is force-closed (with a warning): the
+ *       backend's dev_close is invoked and the handle slot is released
+ *       without running the normal per-device close path, so data still in
+ *       flight on that handle may be lost.
  */
 csStatus csShutdown(void);
 
@@ -681,30 +739,93 @@ const char *csGetVersion(void);
  * @{
  */
 
+/** Static device properties (SNIA CS API §5.1) */
 typedef struct {
-	uint32_t num_cses;
-	uint32_t num_csees;
-	size_t   fdm_total_bytes;
-	size_t   afdm_total_bytes;
-	uint32_t max_concurrent_progs;
-	uint32_t csf_count;
+	uint32_t num_cses;          /**< Number of Computational Storage Engines */
+	uint32_t num_csees;         /**< Number of Computational Storage Engines-Enhanced */
+	size_t   fdm_total_bytes;  /**< Total Fixed Device Memory bytes */
+	size_t   afdm_total_bytes; /**< Total Application-Facing Device Memory bytes */
+	uint32_t max_concurrent_progs; /**< Max concurrently active programs */
+	uint32_t csf_count;         /**< Number of supported CSFs */
 } csDeviceProperties;
 
+/** Cumulative device activity counters */
 typedef struct {
-	uint64_t total_executes;
-	uint64_t total_bytes_processed;
-	uint64_t total_errors;
-	uint64_t avg_latency_ns;
+	uint64_t total_executes;         /**< Executions since reset */
+	uint64_t total_bytes_processed;  /**< Bytes processed since reset */
+	uint64_t total_errors;           /**< Failed executions since reset */
+	uint64_t avg_latency_ns;         /**< Average execution latency (ns) */
 } csDeviceStatistics;
 
+/**
+ * Query static device properties
+ *
+ * @param[in]  csx_handle  Device handle
+ * @param[out] props       Returned device properties
+ *
+ * @return CS_STATUS_SUCCESS on success, or error code
+ */
 csStatus csQueryDeviceProperties(csCSxHandle csx_handle, csDeviceProperties *props);
+
+/**
+ * Query cumulative device statistics
+ *
+ * @param[in]  csx_handle  Device handle
+ * @param[out] stats      Returned device statistics
+ *
+ * @return CS_STATUS_SUCCESS on success, or error code
+ */
 csStatus csQueryDeviceStatistics(csCSxHandle csx_handle, csDeviceStatistics *stats);
+
+/**
+ * Configure a device parameter
+ *
+ * @param[in] csx_handle  Device handle
+ * @param[in] config_id    Configuration parameter ID
+ * @param[in] data        Configuration payload
+ * @param[in] size        Payload size in bytes
+ *
+ * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_NOT_SUPPORTED if the
+ *         backend does not implement device configuration, or error code
+ */
 csStatus csConfig(csCSxHandle csx_handle, uint32_t config_id, const void *data, size_t size);
+
+/**
+ * Reset a device or its statistics
+ *
+ * @param[in] csx_handle  Device handle
+ * @param[in] reset_type  Reset type (device, statistics, or both)
+ *
+ * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_NOT_SUPPORTED if the
+ *         backend does not implement reset, or error code
+ */
 csStatus csReset(csCSxHandle csx_handle, uint32_t reset_type);
 
+/**
+ * Download a Computational Storage Function image
+ *
+ * @param[in]  csx_handle  Device handle
+ * @param[in]  csf_binary  CSF image bytes
+ * @param[in]  size        Image size in bytes
+ * @param[out] csf_id      Returned CSF identifier
+ *
+ * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_NOT_SUPPORTED if the
+ *         backend does not support downloadable CSFs, or error code
+ */
 csStatus csCSFDownload(csCSxHandle csx_handle, const void *csf_binary,
 		       size_t size, csCSFId *csf_id);
 
+/**
+ * Download a Computational Storage Engine-Enhanced image
+ *
+ * @param[in]  csx_handle  Device handle
+ * @param[in]  image       CSEE image bytes
+ * @param[in]  size        Image size in bytes
+ * @param[out] csee_id     Returned CSEE identifier
+ *
+ * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_NOT_SUPPORTED if the
+ *         backend does not support downloadable CSEEs, or error code
+ */
 csStatus csCSEEDownload(csCSxHandle csx_handle, const void *image,
 			size_t size, uint32_t *csee_id);
 
@@ -736,27 +857,79 @@ csStatus csGroupComputeByIds(csCSxHandle csx_handle, const csCSFId *csf_ids,
  */
 csStatus csUngroupComputeFromGroupId(csCSxHandle csx_handle, uint32_t group_id);
 
-typedef struct {
-	uint32_t api_version;
-	uint32_t num_backends;
-	uint32_t features;
-} csLibrarySupport;
-
 #define CS_FEATURE_ASYNC_COMPUTE  0x01u
 #define CS_FEATURE_BATCH          0x02u
-#define CS_FEATURE_EVENTS         0x04u
+#define CS_FEATURE_EVENTS          0x04u
 #define CS_FEATURE_EBPF           0x08u
 
+/** Library capability summary */
+typedef struct {
+	uint32_t api_version;   /**< API version */
+	uint32_t num_backends;  /**< Number of registered backends */
+	uint32_t features;     /**< Bitwise OR of CS_FEATURE_* flags */
+} csLibrarySupport;
+
+/**
+ * Query library capability summary
+ *
+ * @param[out] support  Returned library support information
+ *
+ * @return CS_STATUS_SUCCESS on success, or error code
+ */
 csStatus csQueryLibrarySupport(csLibrarySupport *support);
 
+/**
+ * Register a backend plugin with the library
+ *
+ * @param[in] ops  Backend operations vtable (see cs_backend.h)
+ *
+ * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_ALREADY_EXISTS if a
+ *         backend with the same name is already registered, or error code
+ *
+ * @deprecated Superseded by cs_backend_register() (cs_backend.h); the two APIs
+ *             share one registry. This entry point will be removed in the next
+ *             major release.
+ */
 struct cs_backend_ops;
 csStatus csRegisterPlugin(const struct cs_backend_ops *ops);
+
+/**
+ * Deregister a backend plugin by name
+ *
+ * @param[in] name  Backend name to remove
+ *
+ * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_NOT_FOUND if no
+ *         backend with that name is registered, or error code
+ *
+ * @deprecated Superseded by cs_backend_unregister(); will be removed in the
+ *             next major release.
+ */
 csStatus csDeregisterPlugin(const char *name);
 
 typedef void (*csNotifyCallback)(uint32_t event_type, void *user_data);
 
+/**
+ * Register a callback for device notifications
+ *
+ * @param[in] csx_handle   Device handle
+ * @param[in] event_type   Notification event type to subscribe to
+ * @param[in] callback     Callback invoked on the event (NULL to unsubscribe)
+ * @param[in] user_data    Opaque context passed to the callback
+ *
+ * @return CS_STATUS_SUCCESS on success, or error code
+ */
 csStatus csRegisterNotify(csCSxHandle csx_handle, uint32_t event_type,
 			  csNotifyCallback callback, void *user_data);
+
+/**
+ * Remove a previously registered notification callback
+ *
+ * @param[in] csx_handle   Device handle
+ * @param[in] event_type   Notification event type to unsubscribe from
+ *
+ * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_NOT_FOUND if no
+ *         callback is registered for the event type, or error code
+ */
 csStatus csDeregisterNotify(csCSxHandle csx_handle, uint32_t event_type);
 
 /** @} */

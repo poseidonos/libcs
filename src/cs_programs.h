@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * @file cs_programs.h
- * @brief Single source of truth for CPCS program index constants and tables
+ * @brief Single source of truth for compute program index constants and tables
  */
 
 #ifndef CS_PROGRAMS_H
@@ -14,7 +14,7 @@
 #include <stdint.h>
 #include "cs_api.h"
 
-/* CPCS program indices (PIND) — wire protocol values matching SPDK target */
+/* Compute program indices (PIND) — wire protocol values matching SPDK target */
 #define LIBCS_PIND_MEMCPY             0u
 #define LIBCS_PIND_MEMFILL            1u
 #define LIBCS_PIND_SUM64              2u
