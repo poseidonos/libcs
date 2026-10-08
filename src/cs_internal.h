@@ -67,6 +67,10 @@ cs_parse_u32_env(const char *name, uint32_t *out)
  * @param p Backend function-name prefix (e.g. ioctl_backend); expands
  *          to `p##_init`, `p##_dev_open`, ... exactly matching the
  *          cs_backend_ops_t slot signatures in cs_backend.h.
+ *
+ * Slots with portable shared implementations (mem_init, prog_get_name,
+ * query_csf_list, abort_request — cs_backend_helpers.c) are not stubbed;
+ * every backend wires those to the shared functions on all platforms.
  */
 #define CS_DEFINE_BACKEND_STUBS(p)                                              \
 	static csStatus p##_init(void)                                          \
@@ -129,24 +133,6 @@ cs_parse_u32_env(const char *name, uint32_t *out)
 	}                                                                       \
 	static int p##_poll(struct cs_backend_ctx *c, uint32_t m)               \
 	{ (void)c; (void)m; return 0; }                                         \
-	static csStatus p##_mem_init(struct cs_backend_ctx *c, void *p_,        \
-				     uint8_t f, size_t s)                       \
-	{                                                                       \
-		(void)c; (void)p_; (void)f; (void)s;                            \
-		return CS_STATUS_ERROR_NOT_SUPPORTED;                           \
-	}                                                                       \
-	static csStatus p##_prog_get_name(struct cs_backend_ctx *c,             \
-					  uint16_t i, char *n, size_t ns)     \
-	{                                                                       \
-		(void)c; (void)i; (void)n; (void)ns;                            \
-		return CS_STATUS_ERROR_NOT_SUPPORTED;                           \
-	}                                                                       \
-	static csStatus p##_query_csf_list(struct cs_backend_ctx *c,            \
-					   csCSFInfo *csfs, uint32_t *cnt)   \
-	{                                                                       \
-		(void)c; (void)csfs; if (cnt) *cnt = 0;                         \
-		return CS_STATUS_ERROR_NOT_SUPPORTED;                           \
-	}                                                                       \
 	static csStatus p##_compute_submit(struct cs_backend_ctx *c,            \
 					   uint16_t i, const void *in,        \
 					   size_t is, void *o, size_t os,     \
@@ -159,9 +145,6 @@ cs_parse_u32_env(const char *name, uint32_t *out)
 	}                                                                       \
 	static csStatus p##_compute_reap(struct cs_backend_ctx *c,              \
 					 volatile int *cp)                     \
-	{ (void)c; (void)cp; return CS_STATUS_ERROR_NOT_SUPPORTED; }            \
-	static csStatus p##_abort_request(struct cs_backend_ctx *c,             \
-					  volatile int *cp)                    \
 	{ (void)c; (void)cp; return CS_STATUS_ERROR_NOT_SUPPORTED; }
 
 /** @} */
@@ -366,6 +349,14 @@ typedef struct cs_global_state {
 	pthread_mutex_t backends_lock;
 } cs_global_state_t;
 
+/*
+ * Global state singleton -- defined in cs_api.c, shared across the
+ * cs_api_*.c translation units (backend registry, device/memory/event
+ * tables and their locks). Access via cs_get_state() or directly under
+ * the corresponding lock; see @ref cs_internal_funcs.
+ */
+extern cs_global_state_t g_state;
+
 /** @} */
 
 /**
@@ -378,6 +369,53 @@ cs_global_state_t *cs_get_state(void);
 
 /** Ensure library is initialized */
 csStatus cs_ensure_init(void);
+
+/*
+ * Backend registry (cs_api.c). Declared here for the cs_api_*.c
+ * translation units; guarded by g_state.backends_lock.
+ */
+csStatus cs_backend_register(const cs_backend_ops_t *ops);
+csStatus cs_backend_unregister(const char *name);
+const cs_backend_ops_t *cs_backend_get(const char *name);
+const cs_backend_ops_t *cs_backend_get_default(void);
+csStatus cs_backend_list(const char **names, uint32_t *count);
+
+/*
+ * Portable vtable ops shared by the ioctl/libnvme/io_uring backends
+ * (cs_backend_helpers.c). Every backend wires these slots directly;
+ * they need no platform support, so CS_DEFINE_BACKEND_STUBS defines
+ * no fallbacks for them.
+ */
+csStatus cs_backend_mem_init(struct cs_backend_ctx *ctx, void *ptr,
+			     uint8_t fill_value, size_t size);
+csStatus cs_backend_prog_get_name(struct cs_backend_ctx *ctx, uint16_t prog_index,
+				  char *name, size_t name_size);
+csStatus cs_backend_query_csf_list(struct cs_backend_ctx *ctx, csCSFInfo *csfs,
+				   uint32_t *count);
+csStatus cs_backend_abort_request(struct cs_backend_ctx *ctx, volatile int *completion);
+void cs_backend_ctrl_path_from_uri(const char *uri, char *out, size_t out_sz,
+				   const char *scheme);
+
+/* Shared wire constants and helpers for the NVMe passthrough backends */
+#define ALIGN4(_n) (((_n) + 3U) & ~((size_t)3U))
+
+/* CP/SLM opcodes from libxnvme_cs.h / libxnvme_slm.h */
+#define OPC_CP_LOAD        0x85u
+#define OPC_CP_ACTIVATE    0x88u
+#define OPC_CP_MEM_RANGE   0x89u
+#define OPC_CP_EXECUTE     0x01u
+#define OPC_NVM_WRITE      0x01u
+#define OPC_NVM_READ       0x02u
+#define OPC_SLM_COPY       0x01u
+#define OPC_IDENTIFY       0x06u
+
+/* MULTI_AGG64 kernel output layout shared by every passthrough backend */
+struct libcs_multi_agg64_result {
+	uint64_t count;
+	double   sum;
+	double   min;
+	double   max;
+};
 
 /**
  * Device context management
@@ -456,6 +494,20 @@ bool xnvme_uri_is_local_direct(const char *uri);
 size_t cs_infer_bytes_produced(csCSFId csf_id,
 			       const void *input, size_t input_size,
 			       const void *output, size_t output_size);
+
+/*
+ * Shared by the cs_helpers*.c translation units: one-shot paths live in
+ * cs_helpers.c, cached-session paths in cs_helpers_cached.c.
+ */
+
+/** Capacity of the per-URI cache key in cs_cached_session_t/cs_read_cached_t */
+#define CS_CACHED_URI_MAX 256
+
+/** Element size in bytes for @p csf_id's input/output, 0 if unknown */
+uint32_t cs_element_size_for_csf(csCSFId csf_id);
+
+/** Zero the variable-output region so unparsed tail bytes are well-defined */
+void cs_prepare_variable_output(csCSFId csf_id, void *output, size_t output_size);
 
 /** @} */
 
