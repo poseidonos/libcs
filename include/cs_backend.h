@@ -8,6 +8,13 @@
  *
  * This header defines the interface for backend plugins that provide
  * the actual implementation for computational storage operations.
+ *
+ * @par Thread safety
+ * Backend registration (cs_backend_register) and lookup are guarded by a
+ * global registry lock and are safe from any thread. Backends are expected
+ * to register during process startup (library init) and not deregister
+ * while handles are open. Once a backend vtable pointer has been handed
+ * out via csOpenCSx, it must stay valid until shutdown.
  */
 
 #ifndef CS_BACKEND_H
@@ -311,19 +318,98 @@ typedef struct cs_backend_ops {
 	 */
 	int (*poll)(struct cs_backend_ctx *backend_ctx, uint32_t max);
 
+	/**
+	 * Allocate a backend-side batch container
+	 *
+	 * @param[in] backend_ctx   Backend context
+	 * @param[in] mode          Batch execution mode
+	 * @param[in] max_entries   Capacity hint for entries
+	 * @param[out] batch        Returned batch handle
+	 *
+	 * @return CS_STATUS_SUCCESS on success, or error code
+	 */
 	csStatus (*batch_alloc)(struct cs_backend_ctx *backend_ctx, csBatchMode mode,
 				uint32_t max_entries, csBatchHandle *batch);
+
+	/**
+	 * Append one request to a batch
+	 *
+	 * @param[in] batch         Batch handle from batch_alloc
+	 * @param[in] entry         Request descriptor to append
+	 *
+	 * @return CS_STATUS_SUCCESS on success, or error code
+	 */
 	csStatus (*batch_add_entry)(csBatchHandle batch, const csRequest *entry);
+
+	/**
+	 * Submit a batch for execution
+	 *
+	 * @param[in] backend_ctx   Backend context
+	 * @param[in] batch         Batch handle from batch_alloc
+	 * @param[in] callback      Completion callback (NULL for none)
+	 * @param[in] event         Completion event (CS_INVALID_HANDLE for sync)
+	 *
+	 * @return CS_STATUS_SUCCESS for sync completion, CS_STATUS_PENDING for
+	 *         async, or error code
+	 */
 	csStatus (*batch_submit)(struct cs_backend_ctx *backend_ctx, csBatchHandle batch,
 				 csComputeCallback callback, csEventHandle event);
+
+	/**
+	 * Release a batch container
+	 *
+	 * @param[in] backend_ctx   Backend context
+	 * @param[in] batch         Batch handle to free
+	 *
+	 * @return CS_STATUS_SUCCESS on success, or error code
+	 */
 	csStatus (*batch_free)(struct cs_backend_ctx *backend_ctx, csBatchHandle batch);
 
+	/**
+	 * Query static device properties
+	 *
+	 * @param[in] backend_ctx   Backend context
+	 * @param[out] props        Returned device properties
+	 *
+	 * @return CS_STATUS_SUCCESS on success, or error code
+	 */
 	csStatus (*query_device_properties)(struct cs_backend_ctx *backend_ctx,
 					    csDeviceProperties *props);
+
+	/**
+	 * Query cumulative device statistics
+	 *
+	 * @param[in] backend_ctx   Backend context
+	 * @param[out] stats        Returned device statistics
+	 *
+	 * @return CS_STATUS_SUCCESS on success, or error code
+	 */
 	csStatus (*query_device_statistics)(struct cs_backend_ctx *backend_ctx,
 					    csDeviceStatistics *stats);
+
+	/**
+	 * Configure a device parameter
+	 *
+	 * @param[in] backend_ctx   Backend context
+	 * @param[in] config_id     Configuration parameter ID
+	 * @param[in] data          Configuration payload
+	 * @param[in] size          Payload size in bytes
+	 *
+	 * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_NOT_SUPPORTED if
+	 *         unimplemented, or error code
+	 */
 	csStatus (*device_config)(struct cs_backend_ctx *backend_ctx, uint32_t config_id,
 				  const void *data, size_t size);
+
+	/**
+	 * Reset a device
+	 *
+	 * @param[in] backend_ctx   Backend context
+	 * @param[in] reset_type    Reset type (device, statistics, or both)
+	 *
+	 * @return CS_STATUS_SUCCESS on success, CS_STATUS_ERROR_NOT_SUPPORTED if
+	 *         unimplemented, or error code
+	 */
 	csStatus (*device_reset)(struct cs_backend_ctx *backend_ctx, uint32_t reset_type);
 
 } cs_backend_ops_t;

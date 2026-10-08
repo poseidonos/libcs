@@ -20,7 +20,13 @@
 #define CS_VERSION "1.0.0"
 
 /**
- * Global state singleton
+ * Global state singleton.
+ *
+ * `initialized` is the library-lifecycle flag. It is written by csInit()
+ * and csShutdown() under init_lock, and read locklessly as a fast-path
+ * check by cs_ensure_init() (invoked at the top of every public API
+ * entry point) — the flag only ever transitions false→true outside of
+ * shutdown, so the unsynchronized read cannot observe a rollback.
  */
 static cs_global_state_t g_state = {
 	.initialized = false,
@@ -914,7 +920,13 @@ csShutdown(void)
 
 	CS_LOG_INFO("Shutting down CS API library");
 
-	/* Close any still-open device handles */
+	/*
+	 * Force-close still-open devices. This is inside csShutdown() (the
+	 * documented last API call of the process), so we take ownership of
+	 * the handle slot directly: dev_close is invoked on the backend but
+	 * per-handle cleanup events/callbacks are skipped. Not a normal close
+	 * path — applications should csCloseCSx() before csShutdown().
+	 */
 	for (uint32_t i = 0; i < CS_MAX_DEVICES; i++) {
 		if (g_state.devices[i].in_use) {
 			CS_LOG_WARN("Device handle still open at shutdown, force-closing");

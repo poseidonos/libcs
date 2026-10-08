@@ -20,13 +20,7 @@
 
 #include "cs_api.h"
 #include "cs_helpers.h"
-
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-#define TEST_START(name) printf("  %-55s ", name)
-#define TEST_PASS() do { tests_passed++; printf("[PASS]\n"); } while (0)
-#define TEST_FAIL(msg) do { tests_failed++; printf("[FAIL] %s\n", msg); } while (0)
+#include "test_util.h"
 
 static void set_sim_backend(void)
 {
@@ -469,12 +463,10 @@ int main(void)
 	test_filter_no_3x_inflation();
 	test_filter_run_compute();
 
-	printf("\n===========================================\n");
-	printf("  Results: %d passed, %d failed\n", tests_passed, tests_failed);
-	printf("===========================================\n");
+	TEST_SUMMARY();
 
 	csShutdown();
 	unsetenv("LIBCS_BACKEND");
 
-	return tests_failed > 0 ? 1 : 0;
+	return TEST_EXIT();
 }

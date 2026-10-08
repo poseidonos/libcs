@@ -26,7 +26,7 @@
 #define SIM_MAX_MEMORY_MB 256
 #define SIM_DEFAULT_ALIGNMENT 4096U
 
-/* DuckDB/CPCS wire protocol header prepended before float vectors */
+/* Dot-product wire protocol header prepended before float vectors */
 #define LIBCS_DOT_MAGIC 0x43504353u
 typedef struct {
 	uint32_t magic;
@@ -35,7 +35,7 @@ typedef struct {
 	uint32_t dim;
 	float    result;
 	uint32_t flags;
-} CpcsDotProductHeader;
+} CsDotProductHeader;
 
 struct sim_multi_agg64_result {
 	uint64_t count;
@@ -71,7 +71,8 @@ struct cs_backend_ctx {
  * Simulator backend state
  */
 static struct {
-	bool initialized;
+	bool initialized;  /* backend init flag: written by sim_backend_init/shutdown
+	                   * (under the library init_lock), read as re-entry guard */
 } sim_state = { .initialized = false };
 
 static bool
@@ -518,22 +519,22 @@ sim_backend_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 			return CS_STATUS_ERROR_INVALID_PARAM;
 		}
 
-		/* Check for CPCS wire protocol header (magic = 0x43504353 "CPCS") */
-		if (input_size >= sizeof(CpcsDotProductHeader) &&
-		    ((const CpcsDotProductHeader *)input)->magic == LIBCS_DOT_MAGIC) {
-			const CpcsDotProductHeader *hdr = (const CpcsDotProductHeader *)input;
+		/* Check for dot-product wire protocol header (magic = 0x43504353) */
+		if (input_size >= sizeof(CsDotProductHeader) &&
+		    ((const CsDotProductHeader *)input)->magic == LIBCS_DOT_MAGIC) {
+			const CsDotProductHeader *hdr = (const CsDotProductHeader *)input;
 			uint32_t dim = hdr->dim;
 			const float *vecs = (const float *)((const uint8_t *)input +
-							     sizeof(CpcsDotProductHeader));
-			size_t expected = sizeof(CpcsDotProductHeader) + 2u * dim * sizeof(float);
-			if (input_size < expected || output_size < sizeof(CpcsDotProductHeader)) {
+							     sizeof(CsDotProductHeader));
+			size_t expected = sizeof(CsDotProductHeader) + 2u * dim * sizeof(float);
+			if (input_size < expected || output_size < sizeof(CsDotProductHeader)) {
 				return CS_STATUS_ERROR_INVALID_PARAM;
 			}
 			float sum = 0.0f;
 			for (uint32_t i = 0; i < dim; i++) {
 				sum += vecs[i] * vecs[i + dim];
 			}
-			((CpcsDotProductHeader *)output)->result = sum;
+			((CsDotProductHeader *)output)->result = sum;
 			break;
 		}
 

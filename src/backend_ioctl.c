@@ -18,7 +18,7 @@
  *   Strip the namespace suffix: /dev/nvme0n1 → /dev/nvme0
  *
  * Environment variables (shared with xNVMe backend):
- *   LIBCS_XNVME_NSID      — CPCS compute namespace ID (default 2)
+ *   LIBCS_XNVME_NSID      — compute namespace ID (default 2)
  *   LIBCS_XNVME_NVM_NSID  — NVM namespace ID (default 1)
  *   LIBCS_XNVME_SLM_NSID  — SLM namespace ID (MRS path, optional)
  */
@@ -178,6 +178,8 @@ ioctl_io_cmd(int fd, uint8_t opcode, uint32_t nsid,
 
 /* ---------- vtable implementations ---------- */
 
+/* Backend init flag: written by backend init/shutdown (both invoked under the
+ * library init_lock via the vtable), read as a re-entry guard only here. */
 static bool g_initialized = false;
 
 static csStatus

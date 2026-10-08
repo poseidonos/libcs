@@ -179,6 +179,8 @@ uring_submit_sync(struct cs_backend_ctx *ctx, unsigned cmd_op,
 
 /* ---------- vtable implementations ---------- */
 
+/* Backend init flag: written by io_uring_be_init/shutdown (invoked under the
+ * library init_lock via the vtable), read as a re-entry guard only here. */
 static bool g_io_uring_initialized = false;
 
 static csStatus

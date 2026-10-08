@@ -19,13 +19,7 @@
 
 #include "cs_api.h"
 #include "cs_backend.h"
-
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-#define TEST_START(name) printf("  %-55s ", name); fflush(stdout)
-#define TEST_PASS() do { printf("[PASS]\n"); tests_passed++; } while (0)
-#define TEST_FAIL(msg) do { printf("[FAIL] %s\n", msg); tests_failed++; } while (0)
+#include "test_util.h"
 
 static void
 test_vtable_completeness(void)
@@ -406,10 +400,7 @@ main(int argc, char *argv[])
 	test_compute_sync_hardware("xnvme", "/dev/nvme0");
 	test_compute_sync_hardware("xnvme", "/dev/nvme1");
 
-	printf("\n");
-	printf("===========================================\n");
-	printf("  Results: %d passed, %d failed\n", tests_passed, tests_failed);
-	printf("===========================================\n\n");
+	TEST_SUMMARY();
 
-	return tests_failed > 0 ? 1 : 0;
+	return TEST_EXIT();
 }

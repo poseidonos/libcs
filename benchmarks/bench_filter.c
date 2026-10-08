@@ -16,47 +16,14 @@
  * performance. Do not interpret sim_ms as device execution time.
  */
 
-#include <errno.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <time.h>
 
+#include "bench_common.h"
 #include "cs_api.h"
-
-#define RUNS 5
-
-static int
-cmp_double(const void *a, const void *b)
-{
-	double da = *(const double *)a;
-	double db = *(const double *)b;
-	if (da < db) {
-		return -1;
-	}
-	if (da > db) {
-		return 1;
-	}
-	return 0;
-}
-
-static double
-median(double values[RUNS])
-{
-	qsort(values, RUNS, sizeof(double), cmp_double);
-	return values[RUNS / 2];
-}
-
-static double
-now_ms(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return ((double)ts.tv_sec * 1000.0) + ((double)ts.tv_nsec / 1000000.0);
-}
 
 static size_t
 cpu_filter_gt(const float *input, size_t count, float threshold, float *output)
@@ -80,48 +47,20 @@ cs_filter_count(const float *output, size_t capacity)
 	return out_count;
 }
 
-static int
-ensure_results_dir(void)
-{
-	if (mkdir("benchmark_results", 0755) == 0 || errno == EEXIST) {
-		return 0;
-	}
-	return -1;
-}
-
 int
 main(void)
 {
 	srand(12345);
-	setenv("LIBCS_BACKEND", "sim", 1);
 
-	if (ensure_results_dir() != 0) {
-		fprintf(stderr, "Failed to create benchmark_results directory\n");
+	bench_sim_ctx sim;
+	if (bench_sim_open(&sim, "benchmark_results/bench_filter.csv") != 0) {
 		return 1;
 	}
+	FILE *csv = sim.csv;
+	csCSxHandle handle = sim.handle;
+	csStatus status;
 
-	FILE *csv = fopen("benchmark_results/bench_filter.csv", "w");
-	if (!csv) {
-		fprintf(stderr, "Failed to open benchmark_results/bench_filter.csv\n");
-		return 1;
-	}
 	fprintf(csv, "elements,cpu_ref_ms,sim_ms,match\n");
-
-	csStatus status = csInit();
-	if (status != CS_STATUS_SUCCESS) {
-		fprintf(stderr, "csInit failed: %d\n", status);
-		fclose(csv);
-		return 1;
-	}
-
-	csCSxHandle handle;
-	status = csOpenCSx("sim://libcs0", &handle);
-	if (status != CS_STATUS_SUCCESS) {
-		fprintf(stderr, "csOpenCSx failed: %d\n", status);
-		csShutdown();
-		fclose(csv);
-		return 1;
-	}
 
 	const size_t sizes[] = { 10000, 100000, 1000000, 10000000 };
 	const size_t num_sizes = sizeof(sizes) / sizeof(sizes[0]);
@@ -155,9 +94,9 @@ main(void)
 		size_t expected_count = 0;
 
 		for (size_t r = 0; r < RUNS; r++) {
-			double t0 = now_ms();
+			double t0 = bench_now_ms();
 			expected_count = cpu_filter_gt(input, n, threshold, cpu_out);
-			double t1 = now_ms();
+			double t1 = bench_now_ms();
 			cpu_times[r] = t1 - t0;
 		}
 
@@ -176,9 +115,9 @@ main(void)
 				.args_size = sizeof(threshold),
 			};
 
-			double t0 = now_ms();
+			double t0 = bench_now_ms();
 			status = csQueueComputeRequest(handle, &desc, CS_INVALID_HANDLE, NULL, NULL);
-			double t1 = now_ms();
+			double t1 = bench_now_ms();
 			if (status != CS_STATUS_SUCCESS) {
 				fprintf(stderr, "csQueueComputeRequest failed (%zu): %d\n", n, status);
 				free(input);
@@ -197,8 +136,8 @@ main(void)
 		int match = (cs_count == expected_count &&
 		             memcmp(cpu_out, cs_out, expected_count * sizeof(float)) == 0);
 
-		double cpu_ms = median(cpu_times);
-		double sim_ms = median(sim_times);
+		double cpu_ms = bench_median(cpu_times);
+		double sim_ms = bench_median(sim_times);
 
 		printf("%-11zu %-13.3f %-12.3f %s\n",
 		       n, cpu_ms, sim_ms, match ? "PASS" : "FAIL");
@@ -214,8 +153,6 @@ main(void)
 		free(cs_out);
 	}
 
-	csCloseCSx(handle);
-	csShutdown();
-	fclose(csv);
+	bench_sim_close(&sim);
 	return 0;
 }

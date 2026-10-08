@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * @file cs_vector_bench.c
- * @brief Vector similarity search benchmark for CPCS.
+ * @brief Vector similarity search benchmark for the compute-storage device.
  *
  * Models a RAG embedding lookup: find the most similar embeddings in a
  * dataset by dot-product similarity.  Demonstrates the data-movement
@@ -183,6 +183,16 @@ static int run_cpu(const char *filepath, uint32_t n_vecs, uint32_t dim,
 	return 0;
 }
 
+/*
+ * Timing-window parity (AGENTS.md §5.1) — what elapsed_ms includes per iteration:
+ *   CPU path measures:    file read into host RAM + full dot-product compute (every iteration)
+ *   CSD path measures:    per-pair H2D transfer + DOT_PRODUCT execute + D2H result
+ *                         (every iteration; initial file read is a one-time staging
+ *                         cost excluded from the timed loop — do not treat the pair
+ *                         as a fair storage-offload speedup without labeling that)
+ *
+ * bench_compute_from_nvm.c and examples/cs_vector_bench.c carry the same check.
+ */
 /*
  * CSD path: embeddings pre-loaded into host memory (staging cost excluded),
  * then per-embedding DOT_PRODUCT issued via csRunComputeExCached.
