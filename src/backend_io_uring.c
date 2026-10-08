@@ -47,15 +47,6 @@ CS_DEFINE_BACKEND_STUBS(io_uring_be)
 #include <stdio.h>
 #include <math.h>
 
-#define ALIGN4(_n) (((_n) + 3U) & ~((size_t)3U))
-
-struct libcs_multi_agg64_result {
-	uint64_t count;
-	double   sum;
-	double   min;
-	double   max;
-};
-
 /* NVMe uring command opcodes (from linux/nvme_uring.h — defined inline for portability) */
 #ifndef NVME_URING_CMD_IO
 #define NVME_URING_CMD_IO       _IOWR('N', 0x43, struct nvme_uring_cmd)
@@ -85,14 +76,6 @@ struct nvme_uring_cmd {
 };
 #endif /* NVME_URING_CMD_IO */
 
-/* CP/SLM opcodes */
-#define URING_OPC_CP_LOAD       0x85u
-#define URING_OPC_CP_ACTIVATE   0x88u
-#define URING_OPC_CP_MEM_RANGE  0x89u
-#define URING_OPC_CP_EXECUTE    0x01u
-#define URING_OPC_NVM_WRITE     0x01u
-#define URING_OPC_NVM_READ      0x02u
-
 #define URING_QUEUE_DEPTH       64u
 #define URING_TIMEOUT_ADMIN_MS  5000u
 #define URING_TIMEOUT_IO_MS     30000u
@@ -117,7 +100,12 @@ struct cs_backend_ctx {
 	bool cp_output_returns;  /**< CP Execute inline output half
                                    *  visible to host on completion
                                    *  (local/PCIe). False for NVMe-oF
-                                   *  fabrics. */
+                                   *  fabrics.
+                                   *
+                                   *  Documented gap (D1): this backend records the
+                                   *  flag but never branches on it -- inline output
+                                   *  return semantics are honored only by the xnvme
+                                   *  backend. See docs/coverage-gaps.md section 3. */
 
 	struct io_uring ring;
 	bool ring_initialized;
@@ -126,22 +114,6 @@ struct cs_backend_ctx {
 };
 
 /* ---------- helpers ---------- */
-
-static void
-uring_ctrl_path(const char *uri, char *out, size_t out_sz)
-{
-	if (strncmp(uri, "io_uring:", 9) == 0) uri += 9;
-	strncpy(out, uri, out_sz - 1);
-	out[out_sz - 1] = '\0';
-	char *p = strstr(out, "n");
-	while (p) {
-		char *q = p + 1;
-		bool all_digits = (*q != '\0');
-		while (*q) { if (*q < '0' || *q > '9') { all_digits = false; break; } q++; }
-		if (all_digits && q > p + 1) { *p = '\0'; break; }
-		p = strstr(p + 1, "n");
-	}
-}
 
 /* Submit a single NVMe command via io_uring and wait for completion (sync path) */
 static csStatus
@@ -226,7 +198,7 @@ io_uring_be_dev_open(const char *uri, struct cs_backend_ctx **backend_ctx)
 	struct cs_backend_ctx *ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) return CS_STATUS_ERROR_NO_MEMORY;
 
-	uring_ctrl_path(uri, ctx->ctrl_path, sizeof(ctx->ctrl_path));
+	cs_backend_ctrl_path_from_uri(uri, ctx->ctrl_path, sizeof(ctx->ctrl_path), "io_uring:");
 
 	ctx->ctrl_fd = open(ctx->ctrl_path, O_RDWR);
 	if (ctx->ctrl_fd < 0) {
@@ -320,7 +292,7 @@ io_uring_be_prog_load(struct cs_backend_ctx *ctx, uint16_t prog_index,
 	memcpy(buf, program, program_size);
 
 	struct nvme_uring_cmd cmd = {
-		.opcode     = URING_OPC_CP_LOAD,
+		.opcode     = OPC_CP_LOAD,
 		.nsid       = ctx->libcs_nsid,
 		.addr       = (__u64)(uintptr_t)buf,
 		.data_len   = (uint32_t)program_size,
@@ -343,7 +315,7 @@ io_uring_be_prog_activate(struct cs_backend_ctx *ctx, uint16_t prog_index)
 {
 	if (!ctx) return CS_STATUS_ERROR_INVALID_PARAM;
 	struct nvme_uring_cmd cmd = {
-		.opcode     = URING_OPC_CP_ACTIVATE,
+		.opcode     = OPC_CP_ACTIVATE,
 		.nsid       = ctx->libcs_nsid,
 		.cdw10      = (uint32_t)prog_index,  /* action=0 (activate) */
 		.timeout_ms = URING_TIMEOUT_ADMIN_MS,
@@ -359,7 +331,7 @@ io_uring_be_prog_deactivate(struct cs_backend_ctx *ctx, uint16_t prog_index)
 {
 	if (!ctx) return CS_STATUS_ERROR_INVALID_PARAM;
 	struct nvme_uring_cmd cmd = {
-		.opcode     = URING_OPC_CP_ACTIVATE,
+		.opcode     = OPC_CP_ACTIVATE,
 		.nsid       = ctx->libcs_nsid,
 		.cdw10      = (1u << 16) | (uint32_t)prog_index,  /* action=1 */
 		.timeout_ms = URING_TIMEOUT_ADMIN_MS,
@@ -394,7 +366,7 @@ io_uring_be_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		memcpy(buf, input, input_size);
 
 		struct nvme_uring_cmd cmd = {
-			.opcode   = URING_OPC_CP_EXECUTE,
+			.opcode   = OPC_CP_EXECUTE,
 			.nsid     = ctx->libcs_nsid,
 			.addr     = (__u64)(uintptr_t)buf,
 			.data_len = (uint32_t)input_size,
@@ -434,7 +406,7 @@ io_uring_be_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		memcpy(buf, input, input_size);
 
 		struct nvme_uring_cmd cmd = {
-			.opcode   = URING_OPC_CP_EXECUTE,
+			.opcode   = OPC_CP_EXECUTE,
 			.nsid     = ctx->libcs_nsid,
 			.addr     = (__u64)(uintptr_t)buf,
 			.data_len = (uint32_t)input_size,
@@ -472,7 +444,7 @@ io_uring_be_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		memcpy((char *)buf + header, input, input_size);
 
 		struct nvme_uring_cmd cmd = {
-			.opcode   = URING_OPC_CP_EXECUTE,
+			.opcode   = OPC_CP_EXECUTE,
 			.nsid     = ctx->libcs_nsid,
 			.addr     = (__u64)(uintptr_t)buf,
 			.data_len = (uint32_t)combined,
@@ -522,7 +494,7 @@ io_uring_be_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		memcpy(buf, input, input_size);
 
 		struct nvme_uring_cmd cmd = {
-			.opcode   = URING_OPC_CP_EXECUTE,
+			.opcode   = OPC_CP_EXECUTE,
 			.nsid     = ctx->libcs_nsid,
 			.addr     = (__u64)(uintptr_t)buf,
 			.data_len = (uint32_t)combined,
@@ -567,7 +539,7 @@ io_uring_be_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		memcpy(buf, input, input_size);
 
 		struct nvme_uring_cmd cmd = {
-			.opcode   = URING_OPC_CP_EXECUTE,
+			.opcode   = OPC_CP_EXECUTE,
 			.nsid     = ctx->libcs_nsid,
 			.addr     = (__u64)(uintptr_t)buf,
 			.data_len = (uint32_t)combined,
@@ -606,7 +578,7 @@ io_uring_be_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		memcpy((char *)buf + header, input, input_size);
 
 		struct nvme_uring_cmd cmd = {
-			.opcode   = URING_OPC_CP_EXECUTE,
+			.opcode   = OPC_CP_EXECUTE,
 			.nsid     = ctx->libcs_nsid,
 			.addr     = (__u64)(uintptr_t)buf,
 			.data_len = (uint32_t)combined,
@@ -656,7 +628,7 @@ io_uring_be_storage_io(struct cs_backend_ctx *ctx, csStorageOp op,
 	if (!ctx || !buffer || !buffer_size || !blocks) return CS_STATUS_ERROR_INVALID_PARAM;
 	(void)completion;
 
-	uint8_t opcode = (op == CS_STORAGE_READ) ? URING_OPC_NVM_READ : URING_OPC_NVM_WRITE;
+	uint8_t opcode = (op == CS_STORAGE_READ) ? OPC_NVM_READ : OPC_NVM_WRITE;
 
 	struct nvme_uring_cmd cmd = {
 		.opcode     = opcode,
@@ -710,46 +682,6 @@ io_uring_be_poll(struct cs_backend_ctx *ctx, uint32_t max)
 }
 
 static csStatus
-io_uring_be_mem_init(struct cs_backend_ctx *ctx, void *ptr,
-		     uint8_t fill_value, size_t size)
-{
-	(void)ctx;
-	if (!ptr) return CS_STATUS_ERROR_INVALID_PARAM;
-	memset(ptr, fill_value, size);
-	return CS_STATUS_SUCCESS;
-}
-
-static csStatus
-io_uring_be_prog_get_name(struct cs_backend_ctx *ctx, uint16_t prog_index,
-			  char *name, size_t name_size)
-{
-	(void)ctx;
-	if (!name || name_size == 0) return CS_STATUS_ERROR_INVALID_PARAM;
-	const char *prog_name = cs_prog_name_from_pind(prog_index);
-	if (!prog_name) return CS_STATUS_ERROR_NOT_FOUND;
-	snprintf(name, name_size, "%s", prog_name);
-	return CS_STATUS_SUCCESS;
-}
-
-static csStatus
-io_uring_be_query_csf_list(struct cs_backend_ctx *ctx, csCSFInfo *csfs, uint32_t *count)
-{
-	(void)ctx;
-	if (!count) return CS_STATUS_ERROR_INVALID_PARAM;
-	uint32_t total;
-	const cs_csf_entry_t *tbl = cs_csf_table(&total);
-	if (!csfs) { *count = total; return CS_STATUS_SUCCESS; }
-	if (*count < total) { *count = total; return CS_STATUS_ERROR_LIMIT; }
-	for (uint32_t i = 0; i < total; i++) {
-		memset(&csfs[i], 0, sizeof(csfs[i]));
-		snprintf(csfs[i].name, sizeof(csfs[i].name), "%s", tbl[i].name);
-		csfs[i].version = 1;
-	}
-	*count = total;
-	return CS_STATUS_SUCCESS;
-}
-
-static csStatus
 io_uring_be_compute_submit(struct cs_backend_ctx *ctx, uint16_t prog_index,
 			   const void *input, size_t input_size,
 			   void *output, size_t output_size,
@@ -784,15 +716,6 @@ io_uring_be_compute_reap(struct cs_backend_ctx *ctx, volatile int *completion)
 	return (*completion > 0) ? CS_STATUS_SUCCESS : CS_STATUS_ERROR_IO;
 }
 
-static csStatus
-io_uring_be_abort_request(struct cs_backend_ctx *ctx, volatile int *completion)
-{
-	(void)ctx;
-	if (!completion) return CS_STATUS_ERROR_INVALID_PARAM;
-	if (*completion == 0) { *completion = -1; return CS_STATUS_SUCCESS; }
-	return CS_STATUS_ERROR_BUSY;
-}
-
 #endif /* __linux__ && WITH_IO_URING_BACKEND */
 
 /* ---------- registration ---------- */
@@ -809,16 +732,16 @@ static const cs_backend_ops_t io_uring_backend_ops = {
 	.dev_get_info    = io_uring_be_dev_get_info,
 	.mem_alloc       = io_uring_be_mem_alloc,
 	.mem_free        = io_uring_be_mem_free,
-	.mem_init        = io_uring_be_mem_init,
+	.mem_init        = cs_backend_mem_init,
 	.prog_load       = io_uring_be_prog_load,
 	.prog_activate   = io_uring_be_prog_activate,
 	.prog_deactivate = io_uring_be_prog_deactivate,
-	.prog_get_name   = io_uring_be_prog_get_name,
-	.query_csf_list  = io_uring_be_query_csf_list,
+	.prog_get_name   = cs_backend_prog_get_name,
+	.query_csf_list  = cs_backend_query_csf_list,
 	.compute_execute = io_uring_be_compute_execute,
 	.compute_submit  = io_uring_be_compute_submit,
 	.compute_reap    = io_uring_be_compute_reap,
-	.abort_request   = io_uring_be_abort_request,
+	.abort_request   = cs_backend_abort_request,
 	.storage_io      = io_uring_be_storage_io,
 	.poll            = io_uring_be_poll,
 };

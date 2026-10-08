@@ -48,25 +48,6 @@ CS_DEFINE_BACKEND_STUBS(ioctl_backend)
 #include <stdio.h>
 #include <math.h>
 
-#define ALIGN4(_n) (((_n) + 3U) & ~((size_t)3U))
-
-struct libcs_multi_agg64_result {
-	uint64_t count;
-	double   sum;
-	double   min;
-	double   max;
-};
-
-/* CP/SLM opcodes from libxnvme_cs.h / libxnvme_slm.h */
-#define IOCTL_OPC_CP_LOAD       0x85u
-#define IOCTL_OPC_CP_ACTIVATE   0x88u
-#define IOCTL_OPC_CP_MEM_RANGE  0x89u
-#define IOCTL_OPC_CP_EXECUTE    0x01u
-#define IOCTL_OPC_NVM_WRITE     0x01u
-#define IOCTL_OPC_NVM_READ      0x02u
-#define IOCTL_OPC_SLM_COPY      0x01u
-#define IOCTL_OPC_IDENTIFY      0x06u
-
 #define IOCTL_TIMEOUT_ADMIN_MS  5000u
 #define IOCTL_TIMEOUT_IO_MS     30000u
 
@@ -84,31 +65,15 @@ struct cs_backend_ctx {
 	bool      cp_output_returns;  /**< CP Execute inline output half
                                        *  visible to host on completion
                                        *  (local/PCIe). False for NVMe-oF
-                                       *  fabrics. */
+                                       *  fabrics.
+                                       *
+                                       *  Documented gap (D1): this backend records the
+                                       *  flag but never branches on it -- inline output
+                                       *  return semantics are honored only by the xnvme
+                                       *  backend. See docs/coverage-gaps.md section 3. */
 };
 
 /* ---------- helpers ---------- */
-
-/* Strip namespace suffix: /dev/nvme0n1 → /dev/nvme0 */
-static void
-ctrl_path_from_uri(const char *uri, char *out, size_t out_sz)
-{
-	/* Strip optional "ioctl:" prefix */
-	if (strncmp(uri, "ioctl:", 6) == 0) uri += 6;
-
-	strncpy(out, uri, out_sz - 1);
-	out[out_sz - 1] = '\0';
-
-	/* Strip "n<digits>" suffix if present */
-	char *p = strstr(out, "n");
-	while (p) {
-		char *q = p + 1;
-		bool all_digits = (*q != '\0');
-		while (*q) { if (*q < '0' || *q > '9') { all_digits = false; break; } q++; }
-		if (all_digits && q > p + 1) { *p = '\0'; break; }
-		p = strstr(p + 1, "n");
-	}
-}
 
 static csStatus
 ioctl_admin_cmd(int fd, uint8_t opcode, uint32_t nsid,
@@ -228,7 +193,7 @@ ioctl_backend_dev_open(const char *uri, struct cs_backend_ctx **backend_ctx)
 	struct cs_backend_ctx *ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) return CS_STATUS_ERROR_NO_MEMORY;
 
-	ctrl_path_from_uri(uri, ctx->ctrl_path, sizeof(ctx->ctrl_path));
+	cs_backend_ctrl_path_from_uri(uri, ctx->ctrl_path, sizeof(ctx->ctrl_path), "ioctl:");
 
 	ctx->ctrl_fd = open(ctx->ctrl_path, O_RDWR);
 	if (ctx->ctrl_fd < 0) {
@@ -253,7 +218,7 @@ ioctl_backend_dev_open(const char *uri, struct cs_backend_ctx **backend_ctx)
 	uint8_t *idfy = aligned_alloc(CS_DMA_ALIGNMENT, 4096);
 	if (idfy) {
 		memset(idfy, 0, 4096);
-		csStatus s = ioctl_admin_cmd(ctx->ctrl_fd, IOCTL_OPC_IDENTIFY,
+		csStatus s = ioctl_admin_cmd(ctx->ctrl_fd, OPC_IDENTIFY,
 					     ctx->nvm_nsid, idfy, 4096,
 					     0, 0,
 					     /* cdw10: CNS=0 (namespace) */ 0, 0,
@@ -343,7 +308,7 @@ ioctl_backend_prog_load(struct cs_backend_ctx *ctx, uint16_t prog_index,
 	 * CDW11: total_size (bytes)
 	 * CDW14: total_size (bytes, duplicated per spec)
 	 */
-	csStatus s = ioctl_admin_cmd(ctx->ctrl_fd, IOCTL_OPC_CP_LOAD, ctx->libcs_nsid,
+	csStatus s = ioctl_admin_cmd(ctx->ctrl_fd, OPC_CP_LOAD, ctx->libcs_nsid,
 				     buf, (uint32_t)program_size,
 				     0, 0,
 				     (uint32_t)prog_index,           /* cdw10 */
@@ -364,7 +329,7 @@ ioctl_backend_prog_activate(struct cs_backend_ctx *ctx, uint16_t prog_index)
 {
 	if (!ctx) return CS_STATUS_ERROR_INVALID_PARAM;
 	/* CDW10: [15:0]=pind, [16]=action(0=activate) */
-	csStatus s = ioctl_admin_cmd(ctx->ctrl_fd, IOCTL_OPC_CP_ACTIVATE, ctx->libcs_nsid,
+	csStatus s = ioctl_admin_cmd(ctx->ctrl_fd, OPC_CP_ACTIVATE, ctx->libcs_nsid,
 				     NULL, 0, 0, 0,
 				     (uint32_t)prog_index,  /* cdw10: pind, action=0 */
 				     0, 0, 0, 0, 0, NULL);
@@ -378,7 +343,7 @@ ioctl_backend_prog_deactivate(struct cs_backend_ctx *ctx, uint16_t prog_index)
 {
 	if (!ctx) return CS_STATUS_ERROR_INVALID_PARAM;
 	/* CDW10: [15:0]=pind, [16]=action(1=deactivate) */
-	csStatus s = ioctl_admin_cmd(ctx->ctrl_fd, IOCTL_OPC_CP_ACTIVATE, ctx->libcs_nsid,
+	csStatus s = ioctl_admin_cmd(ctx->ctrl_fd, OPC_CP_ACTIVATE, ctx->libcs_nsid,
 				     NULL, 0, 0, 0,
 				     (1u << 16) | (uint32_t)prog_index,  /* cdw10: action=1 */
 				     0, 0, 0, 0, 0, NULL);
@@ -411,7 +376,7 @@ ioctl_backend_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		memcpy(buf, input, input_size);
 
 		uint32_t result = 0;
-		csStatus s = ioctl_io_cmd(ctx->ctrl_fd, IOCTL_OPC_CP_EXECUTE,
+		csStatus s = ioctl_io_cmd(ctx->ctrl_fd, OPC_CP_EXECUTE,
 					  ctx->libcs_nsid, buf, (uint32_t)input_size,
 					  (uint32_t)prog_index, 0,
 					  0, 0, 0, 0, 0, 0, &result);
@@ -445,7 +410,7 @@ ioctl_backend_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		memcpy(buf, input, input_size);
 
 		uint32_t result = 0;
-		csStatus s = ioctl_io_cmd(ctx->ctrl_fd, IOCTL_OPC_CP_EXECUTE,
+		csStatus s = ioctl_io_cmd(ctx->ctrl_fd, OPC_CP_EXECUTE,
 					  ctx->libcs_nsid, buf, (uint32_t)input_size,
 					  (uint32_t)prog_index, 0,
 					  0, 0, 0, 0, 0, 0, &result);
@@ -477,7 +442,7 @@ ioctl_backend_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		memcpy((char *)buf + header, input, input_size);
 
 		uint32_t result = 0;
-		csStatus s = ioctl_io_cmd(ctx->ctrl_fd, IOCTL_OPC_CP_EXECUTE,
+		csStatus s = ioctl_io_cmd(ctx->ctrl_fd, OPC_CP_EXECUTE,
 					  ctx->libcs_nsid, buf, (uint32_t)combined,
 					  (uint32_t)prog_index, 0,
 					  0, 0, 0, 0, 0, 0, &result);
@@ -521,7 +486,7 @@ ioctl_backend_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		memcpy(buf, input, input_size);
 
 		uint32_t cdw0 = 0;
-		csStatus s = ioctl_io_cmd(ctx->ctrl_fd, IOCTL_OPC_CP_EXECUTE,
+		csStatus s = ioctl_io_cmd(ctx->ctrl_fd, OPC_CP_EXECUTE,
 					  ctx->libcs_nsid, buf, (uint32_t)combined,
 					  (uint32_t)prog_index, 0,
 					  0, 0, 0, 0, 0, 0, &cdw0);
@@ -560,7 +525,7 @@ ioctl_backend_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		memcpy(buf, input, input_size);
 
 		uint32_t cdw0 = 0;
-		csStatus s = ioctl_io_cmd(ctx->ctrl_fd, IOCTL_OPC_CP_EXECUTE,
+		csStatus s = ioctl_io_cmd(ctx->ctrl_fd, OPC_CP_EXECUTE,
 					  ctx->libcs_nsid, buf, (uint32_t)combined,
 					  (uint32_t)prog_index, 0,
 					  0, 0, 0, 0, 0, 0, &cdw0);
@@ -593,7 +558,7 @@ ioctl_backend_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		memcpy((char *)buf + header, input, input_size);
 
 		uint32_t cdw0 = 0;
-		csStatus s = ioctl_io_cmd(ctx->ctrl_fd, IOCTL_OPC_CP_EXECUTE,
+		csStatus s = ioctl_io_cmd(ctx->ctrl_fd, OPC_CP_EXECUTE,
 					  ctx->libcs_nsid, buf, (uint32_t)combined,
 					  (uint32_t)prog_index, 0,
 					  0, 0, 0, 0, 0, 0, &cdw0);
@@ -637,7 +602,7 @@ ioctl_backend_storage_io(struct cs_backend_ctx *ctx, csStorageOp op,
 	if (!ctx || !buffer || !buffer_size || !blocks) return CS_STATUS_ERROR_INVALID_PARAM;
 	(void)completion;
 
-	uint8_t opcode = (op == CS_STORAGE_READ) ? IOCTL_OPC_NVM_READ : IOCTL_OPC_NVM_WRITE;
+	uint8_t opcode = (op == CS_STORAGE_READ) ? OPC_NVM_READ : OPC_NVM_WRITE;
 
 	/*
 	 * NVM read/write: CDW10/11 = SLBA, CDW12 = NLB (0-based: blocks-1)
@@ -661,46 +626,6 @@ ioctl_backend_poll(struct cs_backend_ctx *ctx, uint32_t max)
 	/* Synchronous backend — all ops complete before returning */
 	(void)ctx; (void)max;
 	return 0;
-}
-
-static csStatus
-ioctl_backend_mem_init(struct cs_backend_ctx *ctx, void *ptr,
-		       uint8_t fill_value, size_t size)
-{
-	(void)ctx;
-	if (!ptr) return CS_STATUS_ERROR_INVALID_PARAM;
-	memset(ptr, fill_value, size);
-	return CS_STATUS_SUCCESS;
-}
-
-static csStatus
-ioctl_backend_prog_get_name(struct cs_backend_ctx *ctx, uint16_t prog_index,
-			    char *name, size_t name_size)
-{
-	(void)ctx;
-	if (!name || name_size == 0) return CS_STATUS_ERROR_INVALID_PARAM;
-	const char *prog_name = cs_prog_name_from_pind(prog_index);
-	if (!prog_name) return CS_STATUS_ERROR_NOT_FOUND;
-	snprintf(name, name_size, "%s", prog_name);
-	return CS_STATUS_SUCCESS;
-}
-
-static csStatus
-ioctl_backend_query_csf_list(struct cs_backend_ctx *ctx, csCSFInfo *csfs, uint32_t *count)
-{
-	(void)ctx;
-	if (!count) return CS_STATUS_ERROR_INVALID_PARAM;
-	uint32_t total;
-	const cs_csf_entry_t *tbl = cs_csf_table(&total);
-	if (!csfs) { *count = total; return CS_STATUS_SUCCESS; }
-	if (*count < total) { *count = total; return CS_STATUS_ERROR_LIMIT; }
-	for (uint32_t i = 0; i < total; i++) {
-		memset(&csfs[i], 0, sizeof(csfs[i]));
-		snprintf(csfs[i].name, sizeof(csfs[i].name), "%s", tbl[i].name);
-		csfs[i].version = 1;
-	}
-	*count = total;
-	return CS_STATUS_SUCCESS;
 }
 
 static csStatus
@@ -728,15 +653,6 @@ ioctl_backend_compute_reap(struct cs_backend_ctx *ctx, volatile int *completion)
 	return (*completion > 0) ? CS_STATUS_SUCCESS : CS_STATUS_ERROR_IO;
 }
 
-static csStatus
-ioctl_backend_abort_request(struct cs_backend_ctx *ctx, volatile int *completion)
-{
-	(void)ctx;
-	if (!completion) return CS_STATUS_ERROR_INVALID_PARAM;
-	if (*completion == 0) { *completion = -1; return CS_STATUS_SUCCESS; }
-	return CS_STATUS_ERROR_BUSY;
-}
-
 #endif /* __linux__ */
 
 /* ---------- registration ---------- */
@@ -753,16 +669,16 @@ static const cs_backend_ops_t ioctl_backend_ops = {
 	.dev_get_info     = ioctl_backend_dev_get_info,
 	.mem_alloc        = ioctl_backend_mem_alloc,
 	.mem_free         = ioctl_backend_mem_free,
-	.mem_init         = ioctl_backend_mem_init,
+	.mem_init         = cs_backend_mem_init,
 	.prog_load        = ioctl_backend_prog_load,
 	.prog_activate    = ioctl_backend_prog_activate,
 	.prog_deactivate  = ioctl_backend_prog_deactivate,
-	.prog_get_name    = ioctl_backend_prog_get_name,
-	.query_csf_list   = ioctl_backend_query_csf_list,
+	.prog_get_name    = cs_backend_prog_get_name,
+	.query_csf_list   = cs_backend_query_csf_list,
 	.compute_execute  = ioctl_backend_compute_execute,
 	.compute_submit   = ioctl_backend_compute_submit,
 	.compute_reap     = ioctl_backend_compute_reap,
-	.abort_request    = ioctl_backend_abort_request,
+	.abort_request    = cs_backend_abort_request,
 	.storage_io       = ioctl_backend_storage_io,
 	.poll             = ioctl_backend_poll,
 };
