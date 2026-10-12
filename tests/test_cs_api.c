@@ -1375,6 +1375,30 @@ test_sim_device_config_reset(void)
 	memset(&stats, 0, sizeof(stats));
 	status = csQueryDeviceStatistics(handle, &stats);
 	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csQueryDeviceStatistics should succeed on sim");
+	ASSERT_EQ(0ULL, stats.total_executes,
+		  "csQueryDeviceStatistics starts at zero before any compute");
+
+	/* A compute request must accumulate execution counters (device-activity
+	 * accounting happens in the shared csQueueComputeRequest() funnel). */
+	uint64_t in[2] = { 1, 2 };
+	uint64_t sm = 0;
+	csComputeDesc cdesc = {
+		.csf_id = CSF_ID_SUM64,
+		.input_buffer = in,
+		.input_size = sizeof(in),
+		.output_buffer = &sm,
+		.output_size = sizeof(sm),
+	};
+	status = csQueueComputeRequest(handle, &cdesc, CS_INVALID_HANDLE, NULL, NULL);
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csQueueComputeRequest (SUM64) should succeed on sim");
+	ASSERT_EQ(3ULL, sm, "SUM64 of {1,2} should be 3");
+
+	memset(&stats, 0, sizeof(stats));
+	status = csQueryDeviceStatistics(handle, &stats);
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csQueryDeviceStatistics (2nd) should succeed on sim");
+	ASSERT_EQ(1ULL, stats.total_executes, "total_executes should be 1 after one compute");
+	ASSERT_EQ(16ULL, stats.total_bytes_processed, "16 input bytes processed");
+	ASSERT_EQ(0ULL, stats.total_errors, "no errors after a successful compute");
 
 	csCloseCSx(handle);
 	csShutdown();
