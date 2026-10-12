@@ -253,6 +253,14 @@ typedef struct cs_device_ctx {
 	char uri[256];                      /**< Device URI */
 	csDeviceInfo info;                  /**< Cached device info */
 
+	/* Device-activity counters, maintained in csQueueComputeRequest() (the
+	 * funnel every compute request passes through) and read out by
+	 * csQueryDeviceStatistics().  Best-effort diagnostics, no locking. */
+	uint64_t stats_executes;            /**< Executions queued since device open */
+	uint64_t stats_bytes_processed;     /**< Input bytes accepted since open */
+	uint64_t stats_errors;              /**< Executions that ended in error */
+	uint64_t stats_latency_accum_ns;    /**< Sum of execution latencies (ns) */
+
 	/**
 	 * Program slot in-use tracking (Bug 1 fix). Index 0 is always
 	 * reserved/in-use (built-in/default program); indices are claimed by

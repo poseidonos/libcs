@@ -275,15 +275,14 @@ csQueryDeviceStatistics(csCSxHandle csx_handle, csDeviceStatistics *stats)
 		return status;
 	}
 
-	if (ctx->backend && ctx->backend->query_device_statistics) {
-		status = ctx->backend->query_device_statistics(ctx->backend_ctx, stats);
-	} else {
-		memset(stats, 0, sizeof(*stats));
-		status = CS_STATUS_ERROR_NOT_SUPPORTED;
-	}
+	stats->total_executes = ctx->stats_executes;
+	stats->total_bytes_processed = ctx->stats_bytes_processed;
+	stats->total_errors = ctx->stats_errors;
+	stats->avg_latency_ns = ctx->stats_executes
+		? ctx->stats_latency_accum_ns / ctx->stats_executes : 0;
 
 	cs_device_release(ctx);
-	return status;
+	return CS_STATUS_SUCCESS;
 }
 
 csStatus

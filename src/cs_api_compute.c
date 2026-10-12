@@ -13,18 +13,42 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "cs_internal.h"
 #include "cs_programs.h"
-
 /**
  * Compute Operations
  */
+
+/* Accumulate device-activity statistics for csQueryDeviceStatistics().  Called
+ * once per submitted request from csQueueComputeRequest(). */
+static void
+cs_stats_accumulate(cs_device_ctx_t *ctx, uint64_t start_ns, size_t bytes,
+		    csStatus status)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC_RAW, &now);
+	uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+
+	ctx->stats_executes++;
+	ctx->stats_bytes_processed += bytes;
+	ctx->stats_latency_accum_ns += now_ns > start_ns ? now_ns - start_ns : 0;
+	if (status != CS_STATUS_SUCCESS) {
+		ctx->stats_errors++;
+	}
+}
+
 csStatus
 csQueueComputeRequest(csCSxHandle csx_handle, const csComputeDesc *desc,
 		      csEventHandle event, csComputeCallback callback,
 		      void *user_data)
 {
+	struct timespec start;
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+	uint64_t start_ns = (uint64_t)start.tv_sec * 1000000000ULL +
+			    (uint64_t)start.tv_nsec;
+
 	if (!desc) {
 		return CS_STATUS_ERROR_INVALID_PARAM;
 	}
@@ -68,6 +92,7 @@ csQueueComputeRequest(csCSxHandle csx_handle, const csComputeDesc *desc,
 			desc->output_buffer, desc->output_size,
 			desc->threshold, desc->batch,
 			completion);
+		cs_stats_accumulate(dev_ctx, start_ns, desc->input_size, status);
 		cs_device_release(dev_ctx);
 		return status;
 	}
@@ -100,6 +125,7 @@ csQueueComputeRequest(csCSxHandle csx_handle, const csComputeDesc *desc,
 			atomic_store(&evt_ctx->result, status);
 			cs_event_release(evt_ctx);
 		}
+		cs_stats_accumulate(dev_ctx, start_ns, desc->input_size, status);
 		cs_device_release(dev_ctx);
 		if (callback) {
 			callback(status, user_data);
@@ -130,6 +156,7 @@ csQueueComputeRequest(csCSxHandle csx_handle, const csComputeDesc *desc,
 		cs_event_release(evt_ctx);
 	}
 
+	cs_stats_accumulate(dev_ctx, start_ns, desc->input_size, status);
 	cs_device_release(dev_ctx);
 
 	/* Call callback if provided */
