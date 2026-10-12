@@ -524,15 +524,18 @@ sim_backend_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		    ((const CsDotProductHeader *)input)->magic == LIBCS_DOT_MAGIC) {
 			const CsDotProductHeader *hdr = (const CsDotProductHeader *)input;
 			uint32_t dim = hdr->dim;
-			const float *vecs = (const float *)((const uint8_t *)input +
-							     sizeof(CsDotProductHeader));
+			const uint8_t *vecs = (const uint8_t *)input + sizeof(CsDotProductHeader);
 			size_t expected = sizeof(CsDotProductHeader) + 2u * dim * sizeof(float);
 			if (input_size < expected || output_size < sizeof(CsDotProductHeader)) {
 				return CS_STATUS_ERROR_INVALID_PARAM;
 			}
 			float sum = 0.0f;
 			for (uint32_t i = 0; i < dim; i++) {
-				sum += vecs[i] * vecs[i + dim];
+				float a, b;
+				/* memcpy avoids misaligned float* casts on raw byte buffers */
+				memcpy(&a, vecs + i * sizeof(float), sizeof(a));
+				memcpy(&b, vecs + (i + dim) * sizeof(float), sizeof(b));
+				sum += a * b;
 			}
 			((CsDotProductHeader *)output)->result = sum;
 			break;
@@ -546,12 +549,15 @@ sim_backend_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 			return CS_STATUS_ERROR_INVALID_PARAM;
 		}
 
-		const float *in = (const float *)input;
+		const uint8_t *in = (const uint8_t *)input;
 		size_t total_floats = input_size / sizeof(float);
 		size_t half = total_floats / 2;
 		float sum = 0.0f;
 		for (size_t i = 0; i < half; i++) {
-			sum += in[i] * in[i + half];
+			float a, b;
+			memcpy(&a, in + i * sizeof(float), sizeof(a));
+			memcpy(&b, in + (i + half) * sizeof(float), sizeof(b));
+			sum += a * b;
 		}
 		memcpy(output, &sum, sizeof(sum));
 		break;
