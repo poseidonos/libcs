@@ -47,4 +47,7 @@ final tree (see §4).
 ## Known gaps
 
 See `docs/coverage-gaps.md` for the no-caller API list and untested
-areas. Testing them is deferred past this release.
+areas. The three previously-untested no-caller APIs (`csGetCSFInfo`,
+`csGetMemInfo`, `csRunComputeAsync`) now have dedicated tests; the
+remaining items (batch/vtable contract depth, fault injection) are
+deferred past this release.
