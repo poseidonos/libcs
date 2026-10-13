@@ -115,38 +115,38 @@ lib_sources = [
   'src/cs_api_compute.c',
   'src/cs_helpers.c',
   'src/cs_helpers_cached.c',
-  'src/cs_backend_helpers.c',
+  'src/backend/cs_backend_helpers.c',
 ]
 
 if xnvme_dep.found()
   lib_sources += [
-    'src/backend_xnvme.c',
-    'src/backend_xnvme_slm.c',
-    'src/backend_xnvme_compute.c',
-    'src/backend_xnvme_misc.c',
+    'src/backend/backend_xnvme.c',
+    'src/backend/backend_xnvme_slm.c',
+    'src/backend/backend_xnvme_compute.c',
+    'src/backend/backend_xnvme_misc.c',
   ]
 endif
 
 if get_option('sim_backend')
-  lib_sources += ['src/backend_sim.c']
+  lib_sources += ['src/backend/backend_sim.c']
 endif
 
 if get_option('ioctl_backend')
-  lib_sources += ['src/backend_ioctl.c']
+  lib_sources += ['src/backend/backend_ioctl.c']
 endif
 
 liburing_dep = dependency('', required: false)
 if get_option('io_uring_backend')
   liburing_dep = dependency('liburing', required: true,
     not_found_message: 'io_uring_backend requires liburing (apt install liburing-dev)')
-  lib_sources += ['src/backend_io_uring.c']
+  lib_sources += ['src/backend/backend_io_uring.c']
 endif
 
 libnvme_dep = dependency('', required: false)
 if get_option('libnvme_backend')
   libnvme_dep = dependency('libnvme', required: true,
     not_found_message: 'libnvme_backend requires libnvme (apt install libnvme-dev)')
-  lib_sources += ['src/backend_libnvme.c']
+  lib_sources += ['src/backend/backend_libnvme.c']
 endif
 
 # Public headers
