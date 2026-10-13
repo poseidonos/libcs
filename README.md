@@ -787,6 +787,9 @@ export LIBCS_DEBUG=2
 | `test_device_discovery` | No | Query devices |
 | `test_invalid_handle` | No | Handle validation |
 | `test_compute_arg_helper` | No | Argument packing |
+| `test_sim_get_csf_info` | No | `csGetCSFInfo` incl. error paths |
+| `test_sim_get_mem_info` | No | `csGetMemInfo` allocation counters |
+| `test_sim_run_compute_async` | No | `csRunComputeAsync` event path |
 | `test_device_lifecycle` | Yes | Open/close device |
 | `test_memory_allocation` | Yes | DMA memory |
 | `test_event_lifecycle` | Yes | Event management |
