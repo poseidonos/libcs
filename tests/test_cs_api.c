@@ -14,6 +14,7 @@
 #include <assert.h>
 
 #include "cs_api.h"
+#include "cs_helpers.h"
 #include "cs_internal.h"
 
 #define CSF_ID_SUM64 2U
@@ -1441,6 +1442,211 @@ test_sim_csf_download(void)
 }
 
 /* =========================================================
+ * Tier 5.5: Previously untested coverage-gap APIs
+ * (see docs/coverage-gaps.md §1)
+ * ========================================================= */
+
+/**
+ * Test: csGetCSFInfo (no-caller API, coverage-gaps §1)
+ */
+static void
+test_sim_get_csf_info(void)
+{
+	TEST_START("SIM csGetCSFInfo");
+
+	set_sim_backend();
+
+	csStatus status = csInit();
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csInit failed");
+
+	csCSxHandle handle;
+	status = csOpenCSx("sim://libcs0", &handle);
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csOpenCSx(sim) failed");
+
+	/* Error paths */
+	csCSFInfo dummy;
+	status = csGetCSFInfo(handle, CSF_ID_DOT_PRODUCT, NULL);
+	ASSERT_EQ(CS_STATUS_ERROR_INVALID_PARAM, status, "NULL info should fail");
+	status = csGetCSFInfo(CS_INVALID_HANDLE, CSF_ID_DOT_PRODUCT, &dummy);
+	ASSERT_EQ(CS_STATUS_ERROR_INVALID_HANDLE, status, "invalid device handle should fail");
+
+	/* Valid query: implementation formats name as "prog_%u" */
+	csCSFInfo info;
+	memset(&info, 0, sizeof(info));
+	status = csGetCSFInfo(handle, CSF_ID_DOT_PRODUCT, &info);
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csGetCSFInfo failed");
+
+	char expected_name[32];
+	snprintf(expected_name, sizeof(expected_name), "prog_%u", (unsigned)CSF_ID_DOT_PRODUCT);
+	if (strcmp(info.name, expected_name) != 0) {
+		char buf[128];
+		snprintf(buf, sizeof(buf), "csGetCSFInfo name mismatch (got '%s')", info.name);
+		TEST_FAIL(buf);
+		csCloseCSx(handle);
+		csShutdown();
+		unsetenv("LIBCS_BACKEND");
+		return;
+	}
+	if (info.version != 0 || info.flags != 0) {
+		TEST_FAIL("csGetCSFInfo version/flags should be 0");
+		csCloseCSx(handle);
+		csShutdown();
+		unsetenv("LIBCS_BACKEND");
+		return;
+	}
+
+	csCloseCSx(handle);
+	csShutdown();
+	unsetenv("LIBCS_BACKEND");
+	TEST_PASS();
+}
+
+/**
+ * Test: csGetMemInfo (no-caller API, coverage-gaps §1)
+ *
+ * Uses before/after deltas so leftover state from earlier tests in this
+ * process cannot make the absolute counters fail.
+ */
+static void
+test_sim_get_mem_info(void)
+{
+	TEST_START("SIM csGetMemInfo");
+
+	set_sim_backend();
+
+	csStatus status = csInit();
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csInit failed");
+
+	csCSxHandle handle;
+	status = csOpenCSx("sim://libcs0", &handle);
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csOpenCSx(sim) failed");
+
+	/* Error paths */
+	csMemInfo minfo;
+	status = csGetMemInfo(handle, NULL);
+	ASSERT_EQ(CS_STATUS_ERROR_INVALID_PARAM, status, "NULL info should fail");
+	status = csGetMemInfo(CS_INVALID_HANDLE, &minfo);
+	ASSERT_EQ(CS_STATUS_ERROR_INVALID_HANDLE, status, "invalid device handle should fail");
+
+	/* Baseline counters */
+	status = csGetMemInfo(handle, &minfo);
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csGetMemInfo failed");
+	ASSERT_NE(0, minfo.max_allocations, "max_allocations should be > 0");
+
+	uint32_t count_before = minfo.allocation_count;
+	size_t total_before = minfo.total_allocated_bytes;
+
+	/* One allocation should move both counters */
+	csMemDesc desc = { .type = CS_MEM_TYPE_AFDM, .size = 4096 };
+	csMemHandle mem;
+	void *ptr = NULL;
+	status = csAllocMem(handle, &desc, &mem, &ptr);
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csAllocMem(sim) failed");
+
+	status = csGetMemInfo(handle, &minfo);
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csGetMemInfo after alloc failed");
+	if (minfo.allocation_count != count_before + 1 ||
+	    minfo.total_allocated_bytes != total_before + 4096) {
+		char buf[160];
+		snprintf(buf, sizeof(buf),
+			 "counters wrong after alloc (count %u->%u, total %zu->%zu)",
+			 count_before, minfo.allocation_count,
+			 total_before, minfo.total_allocated_bytes);
+		TEST_FAIL(buf);
+		csFreeMem(handle, mem);
+		csCloseCSx(handle);
+		csShutdown();
+		unsetenv("LIBCS_BACKEND");
+		return;
+	}
+
+	/* Free should restore both counters */
+	status = csFreeMem(handle, mem);
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csFreeMem failed");
+
+	status = csGetMemInfo(handle, &minfo);
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csGetMemInfo after free failed");
+	if (minfo.allocation_count != count_before ||
+	    minfo.total_allocated_bytes != total_before) {
+		char buf[160];
+		snprintf(buf, sizeof(buf),
+			 "counters wrong after free (count %u, expected %u)",
+			 minfo.allocation_count, count_before);
+		TEST_FAIL(buf);
+		csCloseCSx(handle);
+		csShutdown();
+		unsetenv("LIBCS_BACKEND");
+		return;
+	}
+
+	csCloseCSx(handle);
+	csShutdown();
+	unsetenv("LIBCS_BACKEND");
+	TEST_PASS();
+}
+
+/**
+ * Test: csRunComputeAsync (no-caller API, coverage-gaps §1)
+ *
+ * Exercises the event/create-queue-wait-destroy path against the sim
+ * backend with the dot-product CSF (expected result 32.0).
+ */
+static void
+test_sim_run_compute_async(void)
+{
+	TEST_START("SIM csRunComputeAsync");
+
+	set_sim_backend();
+
+	csStatus status = csInit();
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csInit failed");
+
+	csCSxHandle handle;
+	status = csOpenCSx("sim://libcs0", &handle);
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csOpenCSx(sim) failed");
+
+	float input[] = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f };
+	float output = 0.0f;
+	csComputeDesc desc = {
+		.csf_id = CSF_ID_DOT_PRODUCT,
+		.input_buffer = input,
+		.input_size = sizeof(input),
+		.output_buffer = &output,
+		.output_size = sizeof(output),
+		.args = NULL,
+		.args_size = 0,
+	};
+
+	/* Error paths */
+	csComputeResult cr;
+	status = csRunComputeAsync(CS_INVALID_HANDLE, &desc, 5000, &cr);
+	ASSERT_EQ(CS_STATUS_ERROR_INVALID_PARAM, status, "invalid device handle should fail");
+	ASSERT_EQ(CS_STATUS_ERROR_INVALID_PARAM, cr.status, "result.status should mirror error");
+	status = csRunComputeAsync(handle, NULL, 5000, &cr);
+	ASSERT_EQ(CS_STATUS_ERROR_INVALID_PARAM, status, "NULL desc should fail");
+
+	/* Valid async execution */
+	memset(&cr, 0, sizeof(cr));
+	status = csRunComputeAsync(handle, &desc, 5000, &cr);
+	ASSERT_EQ(CS_STATUS_SUCCESS, status, "csRunComputeAsync failed");
+	ASSERT_EQ(CS_STATUS_SUCCESS, cr.status, "async completion status should be SUCCESS");
+	if (output != 32.0f) {
+		char buf[128];
+		snprintf(buf, sizeof(buf), "dot-product mismatch (got %f, want 32.0)", (double)output);
+		TEST_FAIL(buf);
+		csCloseCSx(handle);
+		csShutdown();
+		unsetenv("LIBCS_BACKEND");
+		return;
+	}
+
+	csCloseCSx(handle);
+	csShutdown();
+	unsetenv("LIBCS_BACKEND");
+	TEST_PASS();
+}
+
+/* =========================================================
  * Tier 6: Plugin System
  * ========================================================= */
 
@@ -1663,6 +1869,11 @@ main(int argc, char *argv[])
 
 	/* Tier 5: Download */
 	test_sim_csf_download();
+
+	/* Tier 5.5: Coverage-gap APIs (docs/coverage-gaps.md §1) */
+	test_sim_get_csf_info();
+	test_sim_get_mem_info();
+	test_sim_run_compute_async();
 
 	/* Tier 6: Plugin system */
 	test_query_library_support();

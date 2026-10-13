@@ -297,6 +297,7 @@ test_compute_from_nvm_exe = executable(
   install: false,
 )
 
+
 if get_option('sim_backend')
   subdir('benchmarks')
   subdir('examples')

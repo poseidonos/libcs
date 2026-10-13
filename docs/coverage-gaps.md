@@ -12,18 +12,22 @@ done
 
 ## 1. Public APIs with no caller in tests/benchmarks/examples
 
+Update (2026-10-13): the three untested APIs below now have dedicated tests —
+`csGetCSFInfo` / `csGetMemInfo` / `csRunComputeAsync` via sim-backend unit
+tests in `tests/test_cs_api.c`.
+
 | API | Internal use | Disposition |
 |-----|--------------|-------------|
-| `csGetCSFInfo` | none (definition only) | untested — needs unit test |
-| `csGetMemInfo` | none (definition only) | untested — needs unit test |
-| `csRunComputeAsync` | none (definition only) | untested — needs unit test |
+| `csGetCSFInfo` | none (definition only) | ✅ tested by `test_sim_get_csf_info` |
+| `csGetMemInfo` | none (definition only) | ✅ tested by `test_sim_get_mem_info` |
+| `csRunComputeAsync` | none (definition only) | ✅ tested by `test_sim_run_compute_async` |
 | `csQueueCopyMemRequest` | called by `cs_api.c` batch dispatch and `cs_helpers.c` staging paths | exercised indirectly; add a direct unit test |
 | `csQueueStorageRequest` | called by `cs_api.c` batch dispatch | exercised indirectly; add a direct unit test |
 | `csRegisterPlugin` | `tests/test_cs_api.c` (registration bookkeeping test only) | removed by D3 (see below) |
 | `csDeregisterPlugin` | `tests/test_cs_api.c` (same) | removed by D3 (see below) |
 
 Deferred (post-release): add program-lifecycle-focused tests for the
-no-caller list above, prioritizing the lifecycle-heavy APIs
+remaining no-caller list above, prioritizing the lifecycle-heavy APIs
 (load/activate/deactivate/download paths) over trivial getters.
 
 ## 2. Areas without dedicated tests
