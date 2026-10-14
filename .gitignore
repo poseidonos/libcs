@@ -1,4 +1,5 @@
 build/
+build-dir/
 .cache/
 benchmark_results/
 .DS_Store
