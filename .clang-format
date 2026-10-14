@@ -1,0 +1,17 @@
+# Documents the tree's existing style (Linux kernel-like): tabs, return
+# type on its own line for top-level definitions, attached pointer stars.
+BasedOnStyle: LLVM
+Standard: c11
+IndentWidth: 8
+TabWidth: 8
+UseTab: ForContinuationAndIndentation
+ColumnLimit: 100
+PointerAlignment: Right
+BreakBeforeBraces: Linux
+AlwaysBreakAfterReturnType: TopLevelDefinitions
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+IndentCaseLabels: false
+SortIncludes: false
+AlignTrailingComments: true
+SpaceBeforeParens: ControlStatements

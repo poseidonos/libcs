@@ -312,6 +312,13 @@ test_compute_sync_hardware(const char *backend_name, const char *device_uri)
 	setenv("LIBCS_BACKEND", backend_name, 1);
 	csInit();
 
+	if (!cs_backend_get(backend_name)) {
+		TEST_SKIP("backend not registered in this build");
+		csShutdown();
+		unsetenv("LIBCS_BACKEND");
+		return;
+	}
+
 	csCSxHandle handle;
 	csStatus s = csOpenCSx(device_uri, &handle);
 	if (s != CS_STATUS_SUCCESS) {
