@@ -309,6 +309,17 @@ test_compute_sync_hardware(const char *backend_name, const char *device_uri)
 	snprintf(label, sizeof(label), "compute_sync SUM64 via %s backend", backend_name);
 	TEST_START(label);
 
+	if (!device_uri || !device_uri[0]) {
+		TEST_SKIP("no device URI (argv[1] or LIBCS_DEVICE_URI)");
+		return;
+	}
+
+	/* CPCS fabric targets reject the inline execute path (sc=0x0B), so the
+	 * MRS path must be used -- and it needs an SLM device, i.e.
+	 * LIBCS_XNVME_SLM_NSID (e.g. 100 on the two-node rig). Without it this
+	 * test fails with "compute failed: -7". Local DPUs with real inline
+	 * support would not need it. */
+
 	setenv("LIBCS_BACKEND", backend_name, 1);
 	csInit();
 
@@ -378,17 +389,14 @@ test_compute_sync_hardware(const char *backend_name, const char *device_uri)
 int
 main(int argc, char *argv[])
 {
-	const char *device_uri = argc > 1 ? argv[1] : "/dev/nvme1";
+	const char *device_uri = argc > 1 ? argv[1] : getenv("LIBCS_DEVICE_URI");
 
 	printf("\n");
 	printf("===========================================\n");
 	printf("  Backend Vtable + Compute Verification\n");
 	printf("===========================================\n\n");
 
-	printf("Device URI: %s\n", device_uri);
-	printf("NVMe devices:\n");
-	printf("  /dev/nvme0  - local NVMe device (PCIe)\n");
-	printf("  /dev/nvme1  - NVMe-oF target 192.0.2.1:4420\n");
+	printf("Device URI: %s\n", device_uri ? device_uri : "(none)");
 	printf("\nRunning tests:\n\n");
 
 	test_vtable_completeness();
@@ -398,14 +406,10 @@ main(int argc, char *argv[])
 	test_compute_submit_reap_sim();
 
 	test_compute_sync_hardware("sim", "sim://libcs0");
-	test_compute_sync_hardware("ioctl", "/dev/nvme0");
-	test_compute_sync_hardware("ioctl", "/dev/nvme1");
-	test_compute_sync_hardware("io_uring", "/dev/nvme0");
-	test_compute_sync_hardware("io_uring", "/dev/nvme1");
-	test_compute_sync_hardware("libnvme", "/dev/nvme0");
-	test_compute_sync_hardware("libnvme", "/dev/nvme1");
-	test_compute_sync_hardware("xnvme", "/dev/nvme0");
-	test_compute_sync_hardware("xnvme", "/dev/nvme1");
+	test_compute_sync_hardware("ioctl", device_uri);
+	test_compute_sync_hardware("io_uring", device_uri);
+	test_compute_sync_hardware("libnvme", device_uri);
+	test_compute_sync_hardware("xnvme", device_uri);
 
 	TEST_SUMMARY();
 
