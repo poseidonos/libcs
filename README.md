@@ -795,6 +795,20 @@ export LIBCS_DEBUG=2
 | `test_event_lifecycle` | Yes | Event management |
 | `test_compute_sync` | Yes | Sync compute |
 
+### Backend vtable integration test
+
+`test_backend_vtable` runs hardware compute cases against the backend
+registered in the build (e.g. `xnvme`) when a device URI is passed as
+`argv[1]` or `LIBCS_DEVICE_URI`; without a URI they are skipped. CPCS
+fabric targets reject the inline execute path, so the MRS path is
+required -- set the SLM namespace too:
+
+```bash
+LIBCS_XNVME_SLM_NSID=100 \
+LIBCS_XNVME_SUBNQN=<subsystem_nqn> \
+./build/test_backend_vtable <target_ip:port>
+```
+
 ## Troubleshooting
 
 ### Common Issues
