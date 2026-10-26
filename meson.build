@@ -104,38 +104,85 @@ elif not get_option('sim_backend')
   error('No usable backend found. Build xNVMe or enable sim_backend.')
 endif
 
-# SPDK dependency discovery (commit 3/10 of the xNVMe -> direct-SPDK port,
-# see ~/.claude/plans/hidden-sprouting-turtle.md). pkg-config first
-# (spdk_nvme.pc / spdk_env_dpdk.pc, the eventual packaging-correct path once
-# SPDK ships them); falls back to a sibling SPDK build tree the way
-# sdc/build_all.sh's SPDK_DIR does (dev/CI convenience only, NOT a packaging
-# contract — tarball consumers must use pkg-config or -Dspdk_dir).
+# SPDK dependency discovery (commit 4/10 of the xNVMe -> direct-SPDK port,
+# see ~/.claude/plans/hidden-sprouting-turtle.md). `spdk_dep` is the single
+# source of truth for "how do we find SPDK" so later commits (5/6) can swap
+# `xnvme_dep` for `spdk_dep` in lib_sources/libcs_deps as close to a 1-line
+# change as possible. This commit still does NOT add spdk_dep to
+# libcs_deps or lib_sources — it only backs the compile-only check target
+# below (cs_nvme_spdk_compile_check); porting the real backend onto it is
+# commit 5/6 territory.
 #
-# This commit only needs `spdk_dep` to gate a compile-only check target
-# (cs_nvme_spdk_compile_check below); it is NOT added to libcs_deps or
-# lib_sources here — that is commit 4 (full pkg-config wiring + link flags)
-# and commit 5/6 (actually porting the backend onto it) territory.
-spdk_nvme_pc_dep = dependency('spdk_nvme', required: false)
-spdk_env_pc_dep = dependency('spdk_env_dpdk', required: false)
+# Discovery order:
+#   1. pkg-config (spdk_nvme.pc / spdk_env_dpdk.pc) — the packaging-correct
+#      path once SPDK ships them.
+#   2. Sibling SPDK tree (../spdk, or -Dspdk_dir): real built libraries
+#      under build/lib if present (full link capability), else headers
+#      only (compile-check-only, no link). The sibling-tree path is an
+#      internal dev-rig convenience — mirrors sdc/build_all.sh's SPDK_DIR —
+#      and is explicitly NOT a packaging contract (plan §8 design rule).
+#
+# `spdk_backend` (feature: auto/enabled/disabled) gates this whole block so
+# a tarball consumer can force SPDK discovery off deterministically
+# (disabled), force it on and fail loudly if missing (enabled), or keep the
+# current best-effort behavior (auto, the default).
+spdk_backend_opt = get_option('spdk_backend')
 
-if spdk_nvme_pc_dep.found() and spdk_env_pc_dep.found()
-  spdk_dep = declare_dependency(dependencies: [spdk_nvme_pc_dep, spdk_env_pc_dep, thread_dep])
-  message('Using SPDK via pkg-config (spdk_nvme.pc / spdk_env_dpdk.pc)')
+spdk_sibling_dir = get_option('spdk_dir') != '' \
+  ? get_option('spdk_dir') \
+  : meson.project_source_root() / '..' / 'spdk'
+
+if spdk_backend_opt.disabled()
+  spdk_dep = dependency('', required: false)
+  message('SPDK backend discovery disabled via -Dspdk_backend=disabled')
 else
-  spdk_sibling_dir = get_option('spdk_dir') != '' \
-    ? get_option('spdk_dir') \
-    : meson.project_source_root() / '..' / 'spdk'
-  spdk_sibling_hdr = spdk_sibling_dir / 'include' / 'spdk' / 'nvme.h'
+  spdk_nvme_pc_dep = dependency('spdk_nvme', required: false)
+  spdk_env_pc_dep = dependency('spdk_env_dpdk', required: false)
 
-  if run_command('test', '-f', spdk_sibling_hdr, check: false).returncode() == 0
-    spdk_dep = declare_dependency(
-      compile_args: ['-I' + spdk_sibling_dir / 'include'],
-      dependencies: [thread_dep],
-    )
-    message('Using SPDK headers from sibling tree: ' + spdk_sibling_dir
-            + ' (compile-only; no link-time archive resolution attempted by this commit)')
+  if spdk_nvme_pc_dep.found() and spdk_env_pc_dep.found()
+    spdk_dep = declare_dependency(dependencies: [spdk_nvme_pc_dep, spdk_env_pc_dep, thread_dep])
+    message('Using SPDK via pkg-config (spdk_nvme.pc / spdk_env_dpdk.pc)')
   else
-    spdk_dep = dependency('', required: false)
+    spdk_sibling_hdr = spdk_sibling_dir / 'include' / 'spdk' / 'nvme.h'
+    spdk_sibling_lib_dir = spdk_sibling_dir / 'build' / 'lib'
+
+    spdk_sibling_lib_present = false
+    foreach libname : ['libspdk_nvme.a', 'libspdk_nvme.so', 'libspdk_nvme.dylib']
+      if run_command('test', '-f', spdk_sibling_lib_dir / libname, check: false).returncode() == 0
+        spdk_sibling_lib_present = true
+      endif
+    endforeach
+
+    if spdk_sibling_lib_present
+      # Real built libraries in the sibling tree (e.g. the .24/.28 dev rigs,
+      # which build SPDK from source without installing system .pc files).
+      # Strict superset of the header-only case below, so prefer it.
+      spdk_nvme_lib = cc.find_library('spdk_nvme', dirs: [spdk_sibling_lib_dir], required: false)
+      spdk_env_lib = cc.find_library('spdk_env_dpdk', dirs: [spdk_sibling_lib_dir], required: false)
+      if spdk_nvme_lib.found() and spdk_env_lib.found()
+        spdk_dep = declare_dependency(
+          compile_args: ['-I' + spdk_sibling_dir / 'include'],
+          dependencies: [spdk_nvme_lib, spdk_env_lib, thread_dep],
+        )
+        message('Using SPDK libraries from sibling tree: ' + spdk_sibling_lib_dir)
+      else
+        spdk_dep = dependency('', required: false)
+      endif
+    elif run_command('test', '-f', spdk_sibling_hdr, check: false).returncode() == 0
+      spdk_dep = declare_dependency(
+        compile_args: ['-I' + spdk_sibling_dir / 'include'],
+        dependencies: [thread_dep],
+      )
+      message('Using SPDK headers from sibling tree: ' + spdk_sibling_dir
+              + ' (compile-only; no link-time archive resolution attempted by this commit)')
+    else
+      spdk_dep = dependency('', required: false)
+    endif
+  endif
+
+  if spdk_backend_opt.enabled() and not spdk_dep.found()
+    error('spdk_backend=enabled but SPDK could not be found via pkg-config ' +
+          '(spdk_nvme.pc / spdk_env_dpdk.pc) or sibling tree (' + spdk_sibling_dir + ').')
   endif
 endif
 
@@ -365,17 +412,23 @@ test_compute_from_nvm_exe = executable(
 )
 
 
-# SPDK transport compile-only proof (commit 3/10, see
+# SPDK transport compile-only proof (see
 # ~/.claude/plans/hidden-sprouting-turtle.md). Compiles cs_nvme_spdk.c +
 # cs_nvme_cmds.c against REAL SPDK headers -- not xNVMe's -- to catch any
 # signature/layout mismatch as early as possible. static_library() rather
-# than executable(): this commit does not attempt to resolve SPDK's
-# link-time symbols (that needs the whole-archive linker wrapping commit 4
-# adds), only to prove the translation unit compiles. A no-op (not an
-# error) wherever SPDK isn't available, per spdk_dep.found() below -- on
-# this macOS dev machine in particular, SPDK's own headers don't parse
-# (spdk/stdinc.h pulls in Linux-only sys/eventfd.h etc.), so spdk_dep is
-# never found here and this target is simply skipped.
+# than executable(): resolving SPDK's link-time symbols for a real
+# executable needs the whole-archive linker wrapping that a later commit
+# adds when the real backend is ported onto spdk_dep; this target only
+# needs to prove the translation unit compiles. A no-op (not an error)
+# wherever SPDK isn't available, or when -Dspdk_backend=disabled, per
+# spdk_dep.found() below.
+#
+# On this macOS dev machine: no system pkg-config binary is installed and
+# the sibling ../spdk tree has no build/ directory, so spdk_dep resolves
+# via the header-only sibling fallback. Contrary to an earlier assumption
+# recorded here, this fork's SPDK headers DO parse cleanly under Apple
+# clang for this translation unit, so the compile-check actually builds
+# (verified), it does not merely get skipped.
 if spdk_dep.found()
   cs_nvme_spdk_compile_check = static_library(
     'cs_nvme_spdk_compile_check',
