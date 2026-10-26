@@ -94,6 +94,14 @@ ensure_spdk_env_init(const struct cs_nvme_opts *opts)
 {
 	struct spdk_env_opts env_opts;
 
+	/* FIX (hardware-verified bug, see commit message): spdk_env_opts_init()
+	 * reads opts->opts_size BEFORE it memsets the struct (it treats
+	 * opts_size as a versioning field the caller must already have set),
+	 * so an uninitialized opts_size here is live stack garbage, not a
+	 * harmless default. Must be set before the call.
+	 */
+	env_opts.opts_size = sizeof(env_opts);
+
 	pthread_mutex_lock(&g_env_lock);
 	if (g_env_attempted) {
 		pthread_mutex_unlock(&g_env_lock);
@@ -373,6 +381,28 @@ cref_deref(struct spdk_nvme_ctrlr *ctrlr)
 			if ((*pp)->refcount <= 0) {
 				victim = *pp;
 				*pp = victim->next;
+				/* FIX (hardware-verified race, see commit message):
+				 * spdk_nvme_detach() must run BEFORE g_cref_lock is
+				 * released, not after. Dropping the lock first opens
+				 * a window where a concurrent xnvme_dev_open() for
+				 * this same URI finds no cache entry (we already
+				 * unlinked it above) and kicks off a fresh
+				 * spdk_nvme_probe() for the same target while this
+				 * controller is still mid-teardown -- SPDK's nvme.c
+				 * rejects that with "is being destructed" / EBUSY.
+				 * g_cref_lock is already a single global lock
+				 * guarding the whole cache (not per-entry), so
+				 * holding it across detach makes "no cache entry
+				 * for this URI" and "no in-flight detach for this
+				 * URI" the same fact by construction: any opener
+				 * blocks here until the detach is fully done, then
+				 * correctly takes the fresh-probe path against a
+				 * clean slate. This only costs unrelated-URI
+				 * openers one detach's duration, which matches the
+				 * sync-submit-under-mutex style this file already
+				 * uses for dev->sync_lock in xnvme_cmd_pass().
+				 */
+				spdk_nvme_detach(victim->ctrlr);
 			}
 			break;
 		}
@@ -380,7 +410,6 @@ cref_deref(struct spdk_nvme_ctrlr *ctrlr)
 	pthread_mutex_unlock(&g_cref_lock);
 
 	if (victim) {
-		spdk_nvme_detach(victim->ctrlr);
 		free(victim->uri);
 		free(victim);
 	}
