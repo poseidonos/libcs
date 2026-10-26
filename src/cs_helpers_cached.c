@@ -19,15 +19,20 @@
 #include "cs_helpers.h"
 #include "cs_internal.h"
 #include "cs_programs.h"
-/* WITH_XNVME_BACKEND is defined by the build system exactly when libxnvme
- * is linked; __has_include alone breaks builds where only the header is
- * installed (header visible, library absent). */
-#if defined(WITH_XNVME_BACKEND) && __has_include(<libxnvme.h>)
-#include <libxnvme.h>
-#include <libxnvme_nvm.h>
-#define CS_HELPERS_HAS_XNVME 1
+/* csRunComputeFromNvm() needs a hardware backend: it hands the backend an
+ * NVM/SLM source descriptor instead of a host buffer, which the simulator
+ * cannot service. WITH_CPCS_BACKEND is defined by the build system exactly
+ * when the SPDK-backed CPCS backend is compiled into the library.
+ *
+ * This gate used to be CS_HELPERS_HAS_XNVME and also required
+ * __has_include(<libxnvme.h>), pulling <libxnvme.h> and <libxnvme_nvm.h>
+ * in. Both includes were vestigial -- this translation unit never
+ * referenced a single xnvme_* symbol or type; it only ever goes through the
+ * csQueue*Request() public API. Dropped with the xNVMe dependency. */
+#if defined(WITH_CPCS_BACKEND)
+#define CS_HELPERS_HAS_HW_BACKEND 1
 #else
-#define CS_HELPERS_HAS_XNVME 0
+#define CS_HELPERS_HAS_HW_BACKEND 0
 #endif
 
 static uint64_t
@@ -309,7 +314,7 @@ csRunComputeExCachedCleanup(void)
 	}
 }
 
-#if CS_HELPERS_HAS_XNVME
+#if CS_HELPERS_HAS_HW_BACKEND
 
 csStatus
 csRunComputeFromNvm(const char *device_uri,
@@ -405,7 +410,7 @@ csRunComputeFromNvm(const char *device_uri,
 	return CS_STATUS_SUCCESS;
 }
 
-#else /* !CS_HELPERS_HAS_XNVME */
+#else /* !CS_HELPERS_HAS_HW_BACKEND */
 
 csStatus
 csRunComputeFromNvm(const char *device_uri,
@@ -424,4 +429,4 @@ csRunComputeFromNvm(const char *device_uri,
 	return CS_STATUS_ERROR_NOT_SUPPORTED;
 }
 
-#endif /* CS_HELPERS_HAS_XNVME */
+#endif /* CS_HELPERS_HAS_HW_BACKEND */

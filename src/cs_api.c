@@ -767,6 +767,17 @@ cs_backend_get_default(void)
 	/* Check environment variable for backend selection */
 	const char *backend_name = getenv("LIBCS_BACKEND");
 
+	/* The CPCS backend talks to the device through SPDK now, but it still
+	 * registers itself under .name = "xnvme" -- that string is an external
+	 * surface (tests/test_backend_compute.c and the sdc/ bench scripts set
+	 * LIBCS_BACKEND=xnvme), so renaming it would be a breaking change.
+	 * Accept "spdk" and "cpcs" as additive synonyms so callers can select
+	 * it by what it actually is. The registered .name is unchanged. */
+	if (backend_name &&
+	    (strcmp(backend_name, "spdk") == 0 || strcmp(backend_name, "cpcs") == 0)) {
+		backend_name = "xnvme";
+	}
+
 	pthread_mutex_lock(&g_state.backends_lock);
 
 	if (backend_name) {
@@ -819,8 +830,11 @@ cs_backend_list(const char **names, uint32_t *count)
  * Library initialization
  */
 
-/* Forward declaration of xNVMe backend registration */
-#ifdef WITH_XNVME_BACKEND
+/* Forward declaration of the CPCS (SPDK-backed) backend registration.
+ * The macro is WITH_CPCS_BACKEND as of the direct-SPDK port; the symbol
+ * keeps its cs_backend_xnvme_register name until the mechanical rename
+ * commit, so that rename stays reviewable as identifiers-only. */
+#ifdef WITH_CPCS_BACKEND
 extern void cs_backend_xnvme_register(void);
 #endif
 #ifdef WITH_SIM_BACKEND
@@ -868,7 +882,7 @@ csInit(void)
 	memset(g_state.events, 0, sizeof(g_state.events));
 
 	/* Register built-in backends */
-#ifdef WITH_XNVME_BACKEND
+#ifdef WITH_CPCS_BACKEND
 	cs_backend_xnvme_register();
 #endif
 #ifdef WITH_SIM_BACKEND
