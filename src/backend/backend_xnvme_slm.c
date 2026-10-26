@@ -16,17 +16,16 @@
 #include <limits.h>
 #include <math.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "cs_internal.h"
 #include "cs_programs.h"
 
-/* xNVMe headers */
-#include <libxnvme.h>
-#include <libxnvme_nvm.h>
-#include <libxnvme_slm.h>
-#include <libxnvme_cs.h>
+/* libcs-native NVMe shim (replaces <libxnvme*.h>) */
+#include "cs_nvme.h"
 
 #include "backend_xnvme_internal.h"
 
@@ -52,7 +51,7 @@
 #define SLM_RB_CONN_CAP_PER_QD	2u
 
 static void
-slm_rb_cb(struct xnvme_cmd_ctx *cmd_ctx, void *opaque)
+slm_rb_cb(struct cs_nvme_cmd_ctx *cmd_ctx, void *opaque)
 {
 	struct slm_rb_state *st = opaque;
 
@@ -64,10 +63,13 @@ slm_rb_cb(struct xnvme_cmd_ctx *cmd_ctx, void *opaque)
 }
 
 static void
-slm_rb_fill_cmd(struct xnvme_cmd_ctx *cmd_ctx, uint32_t slm_nsid,
+slm_rb_fill_cmd(struct cs_nvme_cmd_ctx *cmd_ctx, uint32_t slm_nsid,
 		uint64_t off, uint32_t len)
 {
-	uint32_t *cdw = (uint32_t *)&cmd_ctx->cmd;
+	/* struct cs_nvme_cmd's own raw-dword union arm: cdw[n] is CDW n, the
+	 * same addresses the previous `(uint32_t *)&cmd_ctx->cmd` cast reached,
+	 * now without the cast (see cs_nvme.h). */
+	uint32_t *cdw = cmd_ctx->cmd.cdw;
 
 	memset(&cmd_ctx->cmd, 0, sizeof(cmd_ctx->cmd));
 	cdw[0]  = 0x02;                          /* SLM MEMORY_READ */
@@ -87,7 +89,7 @@ slm_rb_sync(struct cs_backend_ctx *ctx, uint64_t src_addr, uint8_t *dma,
 
 	while (remaining > 0) {
 		size_t chunk = remaining > SLM_RB_SYNC_CHUNK ? SLM_RB_SYNC_CHUNK : remaining;
-		struct xnvme_cmd_ctx cmd = xnvme_cmd_ctx_from_dev(ctx->slm_dev);
+		struct cs_nvme_cmd_ctx cmd = xnvme_cmd_ctx_from_dev(ctx->slm_dev);
 
 		slm_rb_fill_cmd(&cmd, ctx->slm_nsid, off, (uint32_t)chunk);
 		int rc = xnvme_cmd_pass(&cmd, dma + dst_off, chunk, NULL, 0);
@@ -127,7 +129,7 @@ slm_rb_qd(void)
  * below the sync size), -ETIMEDOUT/-EIO on failure (caller may retry with a
  * smaller chunk). */
 static int
-slm_rb_async_conn(struct xnvme_dev *dev, struct xnvme_queue **qp, uint32_t slm_nsid,
+slm_rb_async_conn(struct cs_nvme_dev *dev, struct cs_nvme_queue **qp, uint32_t slm_nsid,
 		  uint64_t src_addr, uint8_t *dma, size_t aligned, uint32_t chunk_max,
 		  uint32_t *qd_used)
 {
@@ -146,7 +148,7 @@ slm_rb_async_conn(struct xnvme_dev *dev, struct xnvme_queue **qp, uint32_t slm_n
 			return ret;
 		}
 	}
-	struct xnvme_queue *queue = *qp;
+	struct cs_nvme_queue *queue = *qp;
 
 	/* Heap, not stack: on a timeout, commands still in flight keep a pointer
 	 * to this and may complete later (e.g. aborted at queue teardown). */
@@ -173,7 +175,7 @@ slm_rb_async_conn(struct xnvme_dev *dev, struct xnvme_queue **qp, uint32_t slm_n
 		}
 		if (timed_out) break;
 
-		struct xnvme_cmd_ctx *c = xnvme_queue_get_cmd_ctx(queue);
+		struct cs_nvme_cmd_ctx *c = xnvme_queue_get_cmd_ctx(queue);
 		if (!c) {
 			(void)xnvme_queue_poke(queue, 0);
 			if (slm_rb_now_ms() > deadline) timed_out = true;
@@ -239,7 +241,7 @@ slm_rb_default_chunk(struct cs_backend_ctx *ctx)
 	uint32_t chunk = SLM_RB_DEFAULT_CHUNK;
 
 	(void)parse_u32_env("LIBCS_SLM_RB_CHUNK", &chunk);
-	const struct xnvme_geo *geo = xnvme_dev_get_geo(ctx->slm_dev);
+	const struct cs_nvme_geo *geo = xnvme_dev_get_geo(ctx->slm_dev);
 	if (geo && geo->mdts_nbytes >= 2 * SLM_RB_SYNC_CHUNK && chunk > geo->mdts_nbytes)
 		chunk = geo->mdts_nbytes;
 	return chunk;
@@ -270,7 +272,7 @@ static pthread_mutex_t g_slm_rb_open_mtx = PTHREAD_MUTEX_INITIALIZER;
  * part out.  A bounce buffer that may still be the target of in-flight DMA
  * (timeout) is abandoned, never freed. */
 static int
-slm_rb_slice(struct xnvme_dev *dev, struct xnvme_queue **qp, uint32_t slm_nsid,
+slm_rb_slice(struct cs_nvme_dev *dev, struct cs_nvme_queue **qp, uint32_t slm_nsid,
 	     uint8_t **bounce, size_t *bounce_len, uint64_t src, size_t len,
 	     uint8_t *dst, size_t copy, uint32_t chunk)
 {
@@ -299,7 +301,7 @@ slm_rb_worker_main(void *arg)
 	struct slm_rb_worker *w = arg;
 	struct slm_rb_pool *p = w->pool;
 	struct cs_backend_ctx *ctx = p->ctx;
-	struct xnvme_opts opts = ctx->slm_opts;
+	struct cs_nvme_opts opts = ctx->slm_opts;
 	uint64_t seen = 0;
 
 	pthread_mutex_lock(&g_slm_rb_open_mtx);
@@ -653,8 +655,10 @@ xnvme_slm_write_region(struct cs_backend_ctx *ctx, uint64_t dst_addr,
 	while (remaining > 0) {
 		size_t chunk = remaining > 65536 ? 65536 : remaining;
 
-		struct xnvme_cmd_ctx cmd = xnvme_cmd_ctx_from_dev(ctx->slm_dev);
-		uint32_t *cdw = (uint32_t *)&cmd.cmd;
+		struct cs_nvme_cmd_ctx cmd = xnvme_cmd_ctx_from_dev(ctx->slm_dev);
+		/* Raw-dword union arm of struct cs_nvme_cmd; same CDW indices as
+		 * the previous `(uint32_t *)&cmd.cmd` cast (see cs_nvme.h). */
+		uint32_t *cdw = cmd.cmd.cdw;
 		cdw[0]  = 0x05;                          /* SLM MEMORY_WRITE */
 		cdw[1]  = ctx->slm_nsid;                 /* NSID */
 		cdw[10] = (uint32_t)(off & 0xFFFFFFFF);  /* byte offset low */
@@ -713,7 +717,7 @@ slm_rb_filter_survivors(struct cs_backend_ctx *ctx, uint16_t rsid,
 
 	if (_sv_trace) clock_gettime(CLOCK_MONOTONIC_RAW, &_sv_t0);
 
-	struct xnvme_cmd_ctx cmd_ctx;
+	struct cs_nvme_cmd_ctx cmd_ctx;
 	status = xnvme_slm_execute_desc(ctx, LIBCS_PIND_FILTER_GT, rsid,
 					descbuf, sizeof(descbuf), &cmd_ctx);
 	if (status != CS_STATUS_SUCCESS) {
@@ -797,7 +801,7 @@ slm_rb_rle_readback(struct cs_backend_ctx *ctx, uint16_t rsid,
 	((uint32_t *)(descbuf + CS_PROG_DESC_IN_BYTES))[4] = htole32(out_cap);
 	((uint32_t *)(descbuf + CS_PROG_DESC_IN_BYTES))[5] = 0;
 
-	struct xnvme_cmd_ctx cmd_ctx;
+	struct cs_nvme_cmd_ctx cmd_ctx;
 	status = xnvme_slm_execute_desc(ctx, LIBCS_PIND_RLE_COMPRESS, rsid,
 					descbuf, sizeof(descbuf), &cmd_ctx);
 	if (status != CS_STATUS_SUCCESS) {
@@ -833,7 +837,7 @@ xnvme_backend_storage_io(struct cs_backend_ctx *ctx, csStorageOp op,
 		return CS_STATUS_ERROR_INVALID_PARAM;
 	}
 
-	const struct xnvme_geo *geo = xnvme_dev_get_geo(ctx->dev);
+	const struct cs_nvme_geo *geo = xnvme_dev_get_geo(ctx->dev);
 	uint32_t lba_nbytes = geo ? geo->lba_nbytes : 512;
 	size_t required = (size_t)blocks * lba_nbytes;
 	if (buffer_size < required) {
@@ -843,7 +847,7 @@ xnvme_backend_storage_io(struct cs_backend_ctx *ctx, csStorageOp op,
 	uint16_t nlb = (uint16_t)(blocks - 1);
 
 	if (completion && ctx->queue) {
-		struct xnvme_cmd_ctx *async_ctx = xnvme_queue_get_cmd_ctx(ctx->queue);
+		struct cs_nvme_cmd_ctx *async_ctx = xnvme_queue_get_cmd_ctx(ctx->queue);
 		if (!async_ctx) {
 			CS_LOG_ERROR("Failed to get async command context");
 			return CS_STATUS_ERROR_BUSY;
@@ -871,7 +875,7 @@ xnvme_backend_storage_io(struct cs_backend_ctx *ctx, csStorageOp op,
 		return CS_STATUS_PENDING;
 	}
 
-	struct xnvme_cmd_ctx cmd_ctx = xnvme_cmd_ctx_from_dev(ctx->dev);
+	struct cs_nvme_cmd_ctx cmd_ctx = xnvme_cmd_ctx_from_dev(ctx->dev);
 	int ret = 0;
 	if (op == CS_STORAGE_READ) {
 		ret = xnvme_nvm_read(&cmd_ctx, ctx->nsid, lba, nlb, buffer, NULL);

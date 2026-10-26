@@ -14,17 +14,15 @@
 #include <limits.h>
 #include <math.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "cs_internal.h"
 #include "cs_programs.h"
 
-/* xNVMe headers */
-#include <libxnvme.h>
-#include <libxnvme_nvm.h>
-#include <libxnvme_slm.h>
-#include <libxnvme_cs.h>
+/* libcs-native NVMe shim (replaces <libxnvme*.h>) */
+#include "cs_nvme.h"
 
 #include "backend_xnvme_internal.h"
 

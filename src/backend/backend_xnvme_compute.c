@@ -16,17 +16,16 @@
 #include <limits.h>
 #include <math.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "cs_internal.h"
 #include "cs_programs.h"
 
-/* xNVMe headers */
-#include <libxnvme.h>
-#include <libxnvme_nvm.h>
-#include <libxnvme_slm.h>
-#include <libxnvme_cs.h>
+/* libcs-native NVMe shim (replaces <libxnvme*.h>) */
+#include "cs_nvme.h"
 
 #include "backend_xnvme_internal.h"
 
@@ -65,7 +64,7 @@ xnvme_slm_create_mrs_n(struct cs_backend_ctx *ctx,
 		((uint64_t *)(d + 8))[0] = htole64(ranges[i].starting_byte);
 	}
 
-	struct xnvme_cmd_ctx cmd = xnvme_cmd_ctx_from_dev(ctx->dev);
+	struct cs_nvme_cmd_ctx cmd = xnvme_cmd_ctx_from_dev(ctx->dev);
 	int rc = xnvme_cmd_cp_mem_range(&cmd, ctx->libcs_nsid, 0, nr, mrsbuf, buflen);
 	if (rc || xnvme_cmd_ctx_cpl_status(&cmd)) {
 		CS_LOG_ERROR("MRS create failed: nr=%u rc=%d sc=%" PRIu16 " sct=%" PRIu16 "",
@@ -95,7 +94,7 @@ xnvme_slm_create_mrs_n(struct cs_backend_ctx *ctx,
 void
 xnvme_slm_delete_mrs(struct cs_backend_ctx *ctx, uint16_t rsid)
 {
-	struct xnvme_cmd_ctx cmd = xnvme_cmd_ctx_from_dev(ctx->dev);
+	struct cs_nvme_cmd_ctx cmd = xnvme_cmd_ctx_from_dev(ctx->dev);
 	int rc = xnvme_cmd_cp_mem_range_delete(&cmd, ctx->libcs_nsid, rsid);
 
 	if (rc || xnvme_cmd_ctx_cpl_status(&cmd)) {
@@ -127,7 +126,7 @@ xnvme_slm_create_mrs(struct cs_backend_ctx *ctx, uint32_t data_bytes,
 csStatus
 xnvme_slm_execute_desc(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		       uint16_t rsid, const void *desc, size_t desc_len,
-		       struct xnvme_cmd_ctx *out_cmd)
+		       struct cs_nvme_cmd_ctx *out_cmd)
 {
 	uint8_t *execbuf;
 	int rc;
@@ -158,7 +157,7 @@ static csStatus
 xnvme_slm_execute_mrs(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		       uint16_t rsid, uint64_t data_bytes,
 		       uint32_t threshold_bits, bool with_threshold,
-		       struct xnvme_cmd_ctx *out_cmd)
+		       struct cs_nvme_cmd_ctx *out_cmd)
 {
 	size_t descbuf_size = with_threshold ? 32 : 24;
 	uint8_t descbuf[32];
@@ -243,7 +242,7 @@ xnvme_compute_eval_via_mrs(struct cs_backend_ctx *ctx, uint16_t prog_index,
 	uint16_t opcode;
 	uint64_t meta_bytes = 0;
 	uint16_t output_mr_id;
-	struct xnvme_cmd_ctx cmd_ctx;
+	struct cs_nvme_cmd_ctx cmd_ctx;
 
 	if (!args || args_size < CS_EVAL_HDR_BYTES || !output || output_size == 0) {
 		return CS_STATUS_ERROR_INVALID_PARAM;
@@ -490,7 +489,7 @@ xnvme_compute_via_mrs(struct cs_backend_ctx *ctx, uint16_t prog_index,
 	}
 
 	/* Execute: 24-byte descriptor (or 32-byte for FILTER_GT) */
-	struct xnvme_cmd_ctx cmd_ctx;
+	struct cs_nvme_cmd_ctx cmd_ctx;
 	status = xnvme_slm_execute_mrs(ctx, prog_index, rsid, input_size,
 				       threshold_bits, with_threshold, &cmd_ctx);
 	if (status != CS_STATUS_SUCCESS) {
@@ -544,7 +543,7 @@ xnvme_compute_via_mrs(struct cs_backend_ctx *ctx, uint16_t prog_index,
  * Async completion callback for compute operations
  */
 void
-compute_completion_cb(struct xnvme_cmd_ctx *ctx, void *opaque)
+compute_completion_cb(struct cs_nvme_cmd_ctx *ctx, void *opaque)
 {
 	volatile int *completion = (volatile int *)opaque;
 
@@ -621,12 +620,12 @@ xnvme_backend_compute_execute_nvm(struct cs_backend_ctx *ctx, uint16_t prog_inde
 			if (nblocks == 0) nblocks = 1;
 			chunk = (size_t)nblocks * ctx->lba_nbytes;
 
-			struct xnvme_cmd_ctx cmd = xnvme_cmd_ctx_from_dev(ctx->slm_dev);
+			struct cs_nvme_cmd_ctx cmd = xnvme_cmd_ctx_from_dev(ctx->slm_dev);
 			int rc = xnvme_cmd_slm_copy_lba(&cmd, slm_nsid, off,
 							nvm_nsid, blk,
 							(uint16_t)(nblocks - 1),
 							(uint32_t)chunk,
-							XNVME_SLM_COPY_DESC_FMT2);
+							CS_NVME_SLM_COPY_DESC_FMT2);
 			if (rc || xnvme_cmd_ctx_cpl_status(&cmd)) {
 				CS_LOG_ERROR("NVM→SLM stage failed: blk=%" PRIu64
 					     " rc=%d sc=%" PRIu16 "", blk, rc, cmd.cpl.status.sc);
@@ -664,7 +663,7 @@ xnvme_backend_compute_execute_nvm(struct cs_backend_ctx *ctx, uint16_t prog_inde
 			if (nblocks == 0) nblocks = 1;
 			chunk = (size_t)nblocks * ctx->lba_nbytes;
 
-			struct xnvme_cmd_ctx cmd = xnvme_cmd_ctx_from_dev(ctx->dev);
+			struct cs_nvme_cmd_ctx cmd = xnvme_cmd_ctx_from_dev(ctx->dev);
 			int rc = xnvme_nvm_read(&cmd, nvm_nsid, blk,
 					       (uint16_t)(nblocks - 1),
 					       nvm_buf + dst_off, NULL);
@@ -711,7 +710,7 @@ xnvme_backend_compute_execute_nvm(struct cs_backend_ctx *ctx, uint16_t prog_inde
 		if (s != CS_STATUS_SUCCESS)
 			return s;
 
-		struct xnvme_cmd_ctx cmd_ctx;
+		struct cs_nvme_cmd_ctx cmd_ctx;
 		s = xnvme_slm_execute_mrs(ctx, prog_index, rsid, data_size,
 					 0, false, &cmd_ctx);
 		xnvme_slm_delete_mrs(ctx, rsid);
@@ -815,7 +814,7 @@ xnvme_backend_compute_execute_nvm(struct cs_backend_ctx *ctx, uint16_t prog_inde
 		threshold_bits = (uint32_t)(threshold & 0xFFFFFFFFu);
 	}
 
-	struct xnvme_cmd_ctx cmd_ctx;
+	struct cs_nvme_cmd_ctx cmd_ctx;
 	status = xnvme_slm_execute_mrs(ctx, prog_index, rsid, data_size,
 				       threshold_bits, with_threshold, &cmd_ctx);
 	if (status != CS_STATUS_SUCCESS) {
@@ -886,7 +885,7 @@ xnvme_backend_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 		/* Fall through to inline path */
 	}
 
-	struct xnvme_cmd_ctx cmd_ctx;
+	struct cs_nvme_cmd_ctx cmd_ctx;
 
 	/* Built-in programs use direct-buffer layouts and run synchronously. */
 	if (prog_index == LIBCS_PIND_SUM64 ||
@@ -1283,7 +1282,7 @@ xnvme_backend_compute_execute(struct cs_backend_ctx *ctx, uint16_t prog_index,
 
 	/* Async path if completion pointer provided and queue available */
 	if (completion && ctx->queue) {
-		struct xnvme_cmd_ctx *async_ctx = xnvme_queue_get_cmd_ctx(ctx->queue);
+		struct cs_nvme_cmd_ctx *async_ctx = xnvme_queue_get_cmd_ctx(ctx->queue);
 		if (!async_ctx) {
 			CS_LOG_ERROR("Failed to get async command context");
 			return CS_STATUS_ERROR_BUSY;

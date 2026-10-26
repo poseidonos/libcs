@@ -15,17 +15,15 @@
 #include <limits.h>
 #include <math.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "cs_internal.h"
 #include "cs_programs.h"
 
-/* xNVMe headers */
-#include <libxnvme.h>
-#include <libxnvme_nvm.h>
-#include <libxnvme_slm.h>
-#include <libxnvme_cs.h>
+/* libcs-native NVMe shim (replaces <libxnvme*.h>) */
+#include "cs_nvme.h"
 
 #include "backend_xnvme_internal.h"
 
@@ -233,7 +231,7 @@ xnvme_backend_dev_open(const char *uri, struct cs_backend_ctx **backend_ctx)
 	/* Get namespace ID and geometry */
 	ctx->nsid = xnvme_dev_get_nsid(ctx->dev);
 	{
-		const struct xnvme_geo *geo = xnvme_dev_get_geo(ctx->dev);
+		const struct cs_nvme_geo *geo = xnvme_dev_get_geo(ctx->dev);
 		ctx->lba_nbytes = (geo && geo->lba_nbytes) ? geo->lba_nbytes : 512;
 	}
 
@@ -249,7 +247,7 @@ xnvme_backend_dev_open(const char *uri, struct cs_backend_ctx **backend_ctx)
 	{
 		uint32_t slm_ns = 0;
 		if (parse_u32_env("LIBCS_XNVME_SLM_NSID", &slm_ns) && slm_ns > 0) {
-			struct xnvme_opts slm_opts = ctx->opts;
+			struct cs_nvme_opts slm_opts = ctx->opts;
 			slm_opts.nsid = slm_ns;
 			ctx->slm_dev = xnvme_dev_open(uri, &slm_opts);
 			if (ctx->slm_dev) {
@@ -333,12 +331,12 @@ xnvme_backend_dev_get_info(struct cs_backend_ctx *ctx, csDeviceInfo *info)
 
 	memset(info, 0, sizeof(*info));
 
-	const struct xnvme_ident *ident = xnvme_dev_get_ident(ctx->dev);
+	const struct cs_nvme_ident *ident = xnvme_dev_get_ident(ctx->dev);
 	if (ident) {
 		snprintf(info->uri, sizeof(info->uri), "%s", ident->uri);
 	}
 
-	const struct xnvme_spec_idfy_ctrlr *ctrlr = xnvme_dev_get_ctrlr(ctx->dev);
+	const struct cs_nvme_spec_idfy_ctrlr *ctrlr = xnvme_dev_get_ctrlr(ctx->dev);
 	if (ctrlr) {
 		/* Extract vendor/model from identify data */
 		strncpy(info->vendor, ctrlr->vid ? "NVMe" : "Unknown",
@@ -351,11 +349,11 @@ xnvme_backend_dev_get_info(struct cs_backend_ctx *ctx, csDeviceInfo *info)
 	}
 
 	/* Get CS namespace info if available */
-	const struct xnvme_spec_idfy_ns *ns_css = xnvme_dev_get_ns_css(ctx->dev);
+	const struct cs_nvme_spec_idfy_ns *ns_css = xnvme_dev_get_ns_css(ctx->dev);
 	if (ns_css) {
 		/* Cast to CS namespace structure */
-		const struct xnvme_spec_cp_idfy_ns *cp_ns =
-			(const struct xnvme_spec_cp_idfy_ns *)ns_css;
+		const struct cs_nvme_spec_cp_idfy_ns *cp_ns =
+			(const struct cs_nvme_spec_cp_idfy_ns *)ns_css;
 		info->max_programs = cp_ns->maxact;
 		info->max_memory_mb = (uint32_t)cp_ns->maxpb;
 	} else {
@@ -409,7 +407,7 @@ xnvme_backend_prog_load(struct cs_backend_ctx *ctx, uint16_t prog_index,
 	}
 
 	/* Get command context */
-	struct xnvme_cmd_ctx cmd_ctx = xnvme_cmd_ctx_from_dev(ctx->dev);
+	struct cs_nvme_cmd_ctx cmd_ctx = xnvme_cmd_ctx_from_dev(ctx->dev);
 
 	/* Execute load command */
 	int ret = xnvme_cmd_cp_load(&cmd_ctx, ctx->libcs_nsid, prog_index,
@@ -438,7 +436,7 @@ xnvme_backend_prog_activate(struct cs_backend_ctx *ctx, uint16_t prog_index)
 		return CS_STATUS_ERROR_INVALID_PARAM;
 	}
 
-	struct xnvme_cmd_ctx cmd_ctx = xnvme_cmd_ctx_from_dev(ctx->dev);
+	struct cs_nvme_cmd_ctx cmd_ctx = xnvme_cmd_ctx_from_dev(ctx->dev);
 
 	/* Action 0 = Activate */
 	int ret = xnvme_cmd_cp_activate(&cmd_ctx, ctx->libcs_nsid, prog_index, 0);
@@ -465,7 +463,7 @@ xnvme_backend_prog_deactivate(struct cs_backend_ctx *ctx, uint16_t prog_index)
 		return CS_STATUS_ERROR_INVALID_PARAM;
 	}
 
-	struct xnvme_cmd_ctx cmd_ctx = xnvme_cmd_ctx_from_dev(ctx->dev);
+	struct cs_nvme_cmd_ctx cmd_ctx = xnvme_cmd_ctx_from_dev(ctx->dev);
 
 	/* Action 1 = Deactivate */
 	int ret = xnvme_cmd_cp_activate(&cmd_ctx, ctx->libcs_nsid, prog_index, 1);

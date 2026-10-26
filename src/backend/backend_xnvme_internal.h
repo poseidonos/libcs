@@ -35,11 +35,8 @@
 #include "cs_internal.h"
 #include "cs_programs.h"
 
-/* xNVMe headers */
-#include <libxnvme.h>
-#include <libxnvme_nvm.h>
-#include <libxnvme_slm.h>
-#include <libxnvme_cs.h>
+/* libcs-native NVMe shim (replaces <libxnvme*.h>) */
+#include "cs_nvme.h"
 
 /* Full definition below; the backend context only holds a pointer. */
 struct slm_rb_pool;
@@ -53,10 +50,10 @@ struct slm_rb_pool;
  * xNVMe backend context
  */
 struct cs_backend_ctx {
-	struct xnvme_dev *dev;          /**< xNVMe device handle (NVM ns) */
-	struct xnvme_dev *slm_dev;      /**< SLM device handle (NULL if unavailable) */
-	struct xnvme_queue *queue;      /**< Command queue for async ops */
-	struct xnvme_queue *slm_queue;  /**< Lazily created queue on slm_dev for
+	struct cs_nvme_dev *dev;          /**< xNVMe device handle (NVM ns) */
+	struct cs_nvme_dev *slm_dev;      /**< SLM device handle (NULL if unavailable) */
+	struct cs_nvme_queue *queue;      /**< Command queue for async ops */
+	struct cs_nvme_queue *slm_queue;  /**< Lazily created queue on slm_dev for
 					  *  async SLM readback (NULL until used) */
 	bool slm_rb_async_disabled;     /**< Set after an async readback failure;
 					  *  later readbacks go straight to sync */
@@ -64,7 +61,7 @@ struct cs_backend_ctx {
 					  *  succeeded (0 = not yet probed) */
 	char *uri;                      /**< dev_open URI, for extra readback
 					  *  connections */
-	struct xnvme_opts slm_opts;     /**< Options slm_dev was opened with */
+	struct cs_nvme_opts slm_opts;     /**< Options slm_dev was opened with */
 	struct slm_rb_pool *rb_pool;    /**< Parallel readback workers
 					  *  (LIBCS_SLM_RB_CONNS > 1; NULL until
 					  *  first large readback) */
@@ -81,7 +78,7 @@ struct cs_backend_ctx {
 	uint32_t lba_nbytes;            /**< NVM LBA size in bytes */
 	uint16_t mrs_rsid;              /**< Current MRS resource ID (0=none) */
 	uint64_t mrs_data_bytes;        /**< Size of data staged in current MRS */
-	struct xnvme_opts opts;         /**< Device options */
+	struct cs_nvme_opts opts;         /**< Device options */
 	bool cp_output_returns;         /**< CP Execute inline output half is
 					  *  visible to the host on completion
 					  *  (local/PCIe direct-attach). False
@@ -156,8 +153,8 @@ struct slm_rb_worker {
 	struct slm_rb_pool *pool;
 	pthread_t tid;
 	bool started;
-	struct xnvme_dev *dev;
-	struct xnvme_queue *queue;
+	struct cs_nvme_dev *dev;
+	struct cs_nvme_queue *queue;
 	uint8_t *bounce;
 	size_t bounce_len;
 	/* current job */
@@ -211,8 +208,8 @@ void xnvme_slm_delete_mrs(struct cs_backend_ctx *ctx, uint16_t rsid);
 csStatus xnvme_slm_execute_desc(struct cs_backend_ctx *ctx,
 				uint16_t prog_index, uint16_t rsid,
 				const void *desc, size_t desc_len,
-				struct xnvme_cmd_ctx *out_cmd);
-void compute_completion_cb(struct xnvme_cmd_ctx *ctx, void *opaque);
+				struct cs_nvme_cmd_ctx *out_cmd);
+void compute_completion_cb(struct cs_nvme_cmd_ctx *ctx, void *opaque);
 
 /* ---- backend vtable operations (backend_xnvme_misc.c ops table) ----- */
 
