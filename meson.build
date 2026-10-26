@@ -286,6 +286,23 @@ if xnvme_dep.found()
   )
 endif
 
+# CP/SLM command-builder differential oracle (dev-only; needs xNVMe headers
+# for the opcode/CSI enum cross-check, no device required). See
+# tests/test_cmd_oracle.c for the full commit-sequence context.
+if xnvme_dep.found()
+  test_cmd_oracle_exe = executable(
+    'test_cmd_oracle',
+    'tests/test_cmd_oracle.c',
+    include_directories: include_directories('include'),
+    dependencies: [thread_dep, xnvme_dep],
+    install: false,
+  )
+
+  test('cmd_oracle_tests', test_cmd_oracle_exe,
+    timeout: 60,
+  )
+endif
+
 # Integration test (built but not run in CI — requires a live target URI,
 # same pattern as test_backend_compute above)
 test_compute_from_nvm_exe = executable(
