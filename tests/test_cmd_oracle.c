@@ -6,14 +6,16 @@
  * @file test_cmd_oracle.c
  * @brief Differential oracle for the 6 CP/SLM NVMe command builders.
  *
- * This is commit 1 of a 10-commit sequence porting libcs off the xNVMe fork
- * onto direct upstream SPDK. Right now this oracle only self-checks against
- * hand-transcribed formulas (hardcoded golden command vectors, derived by
- * reading xnvme/lib/xnvme_cs.c and xnvme/lib/xnvme_slm.c as of this commit)
- * plus the live xNVMe opcode/CSI enum values. Commit 2 will wire the new
- * cs_nvme_cmds.c builders' `_prep` functions into this same golden-vector
- * table via memcmp, turning it into a true differential check against the
- * fork. The final commit in the 10-commit sequence deletes this oracle once
+ * This started as commit 1 of a 10-commit sequence porting libcs off the
+ * xNVMe fork onto direct upstream SPDK (self-checks against hand-transcribed
+ * formulas -- hardcoded golden command vectors, derived by reading
+ * xnvme/lib/xnvme_cs.c and xnvme/lib/xnvme_slm.c -- plus the live xNVMe
+ * opcode/CSI enum values). Commit 2 adds the real differential: the new
+ * src/backend/cs_nvme_cmds.c builders' `_prep` functions are now also wired
+ * into this same golden-vector table via memcmp (see the "commit 2" section
+ * below), making this a true two-sided check of hand-transcribed vectors vs.
+ * actual production code, independent of the "formula" self-check. The
+ * final commit in the 10-commit sequence deletes this oracle once
  * cs_nvme_cmds.c has its own permanent golden-vector unit test.
  *
  * Why hardcoded golden vectors instead of calling the real xNVMe builders:
@@ -54,6 +56,91 @@
 #include <libxnvme.h>
 
 #include "test_util.h"
+
+/* ───────────────────────── cs_nvme_cmds.c _prep prototypes ─────────────────────────
+ *
+ * Commit 2: these are the libcs-native "_prep" helpers implemented in
+ * src/backend/cs_nvme_cmds.c, transcribed from the same xnvme_cs.c /
+ * xnvme_slm.c source as the "formula" builders above. They are pure
+ * (struct cs_nvme_cmd in, no device access) -- see that file's header
+ * comment for the full split rationale.
+ *
+ * This file cannot '#include "cs_nvme.h"' directly: that header declares
+ * xnvme_dev_open()/xnvme_queue_init()/etc. with `struct cs_nvme_dev *`
+ * parameters, which collide (different, incompatible parameter types, same
+ * external name) with the real xNVMe prototypes pulled in by <libxnvme.h>
+ * above for the opcode/CSI enum cross-check -- the two headers cannot be
+ * included in the same translation unit. Since this test only ever touches
+ * two of cs_nvme.h's types, `struct cs_nvme_cmd` and
+ * `struct cs_nvme_spec_slm_copy_desc_fmt23` are duplicated below verbatim
+ * (same member names/types/order/tag, per C's cross-TU struct-compatibility
+ * rule, 6.2.7) instead of pulled in via the header, and the 7 `_prep`
+ * function prototypes are declared directly against these local
+ * definitions. */
+
+struct cs_nvme_cmd {
+	union {
+		uint32_t cdw[16]; /* raw dword access, index == CDW number */
+
+		struct {
+			uint8_t opcode;
+			uint8_t flags;
+			uint16_t cid;
+			uint32_t nsid;
+			uint32_t cdw02;
+			uint32_t cdw03;
+			uint32_t cdw04;
+			uint32_t cdw05;
+			uint32_t cdw06;
+			uint32_t cdw07;
+			uint32_t cdw08;
+			uint32_t cdw09;
+			uint32_t cdw10;
+			uint32_t cdw11;
+			uint32_t cdw12;
+			uint32_t cdw13;
+			uint32_t cdw14;
+			uint32_t cdw15;
+		} common;
+
+		struct {
+			uint32_t cdw00_09[10];
+			uint32_t cdw10;
+			uint32_t cdw11;
+			uint32_t cdw12;
+			uint32_t cdw13;
+			uint32_t cdw14;
+			uint32_t cdw15;
+		} cp;
+	};
+};
+
+struct __attribute__((packed)) cs_nvme_spec_slm_copy_desc_fmt23 {
+	uint32_t snsid;
+	uint32_t rsvd0;
+	uint64_t slba;
+	uint16_t nlb;
+	uint16_t rsvd1;
+	uint32_t rsvd2;
+	uint32_t eilbrt;
+	uint16_t elbat;
+	uint16_t elbatm;
+};
+
+void cs_nvme_cmds_prep_cp_load(struct cs_nvme_cmd *cmd, uint32_t nsid, uint16_t prog_index,
+			       uint32_t psize, uint32_t ptype);
+void cs_nvme_cmds_prep_cp_activate(struct cs_nvme_cmd *cmd, uint32_t nsid, uint16_t prog_index,
+				   uint8_t action);
+void cs_nvme_cmds_prep_cp_execute_buf(struct cs_nvme_cmd *cmd, uint32_t nsid, uint16_t prog_index,
+				      uint16_t mrs_id, uint32_t buf_len);
+void cs_nvme_cmds_prep_cp_mem_range(struct cs_nvme_cmd *cmd, uint32_t nsid, uint32_t mrs_id,
+				    uint32_t numr);
+void cs_nvme_cmds_prep_cp_mem_range_delete(struct cs_nvme_cmd *cmd, uint32_t nsid,
+					   uint16_t mrs_id);
+void cs_nvme_cmds_prep_slm_copy_lba(struct cs_nvme_cmd *cmd, uint32_t dst_nsid, uint64_t dst_addr,
+				    uint64_t nbytes, uint32_t desc_fmt);
+void cs_nvme_cmds_prep_slm_copy_lba_desc(struct cs_nvme_spec_slm_copy_desc_fmt23 *desc,
+					 uint32_t src_nsid, uint64_t slba, uint16_t nlb);
 
 /* ───────────────────────── mismatch reporting ───────────────────────── */
 
@@ -595,11 +682,116 @@ test_slm_copy_lba(void)
 	}
 }
 
+/* ───────────────────────── commit 2: cs_nvme_cmds.c _prep differential ─────────────────────────
+ *
+ * Same golden-vector tables as above, now cross-checked against the real
+ * cs_nvme_cmds.c _prep helpers instead of (or in addition to) the
+ * hand-written "formula" builders. This is the true differential: golden
+ * vectors (hand-transcribed from the fork) vs. this commit's actual
+ * production code.
+ */
+
+#define RUN_PREP_CASES(cases, prep_call)                                                    \
+	do {                                                                                   \
+		for (size_t i = 0; i < sizeof(cases) / sizeof((cases)[0]); i++) {             \
+			struct cs_nvme_cmd cmd;                                               \
+			char msg[160];                                                        \
+			TEST_START((cases)[i].name);                                         \
+			prep_call;                                                            \
+			if (!dwords_match(cmd.cdw, (cases)[i].golden, 16, msg, sizeof(msg),  \
+					   "cmd (cs_nvme_cmds _prep)")) {                     \
+				TEST_FAIL(msg);                                               \
+				continue;                                                     \
+			}                                                                     \
+			TEST_PASS();                                                          \
+		}                                                                              \
+	} while (0)
+
+static void
+test_cp_load_prep(void)
+{
+	RUN_PREP_CASES(cp_load_cases,
+			cs_nvme_cmds_prep_cp_load(&cmd, cp_load_cases[i].nsid,
+						  cp_load_cases[i].prog_index,
+						  ((uint32_t)cp_load_cases[i].buf_len + 4095u) &
+							  ~4095u,
+						  /* ptype, env unset for this oracle */ 0));
+}
+
+static void
+test_cp_activate_prep(void)
+{
+	RUN_PREP_CASES(cp_activate_cases,
+			cs_nvme_cmds_prep_cp_activate(&cmd, cp_activate_cases[i].nsid,
+						      cp_activate_cases[i].prog_index,
+						      cp_activate_cases[i].action));
+}
+
+static void
+test_cp_execute_buf_prep(void)
+{
+	RUN_PREP_CASES(cp_execute_cases,
+			cs_nvme_cmds_prep_cp_execute_buf(&cmd, cp_execute_cases[i].nsid,
+							 cp_execute_cases[i].prog_index,
+							 cp_execute_cases[i].mrs_id,
+							 (uint32_t)cp_execute_cases[i].buf_len));
+}
+
+static void
+test_cp_mem_range_prep(void)
+{
+	RUN_PREP_CASES(cp_mem_range_cases,
+			cs_nvme_cmds_prep_cp_mem_range(&cmd, cp_mem_range_cases[i].nsid,
+						       cp_mem_range_cases[i].mrs_id,
+						       cp_mem_range_cases[i].nr));
+}
+
+static void
+test_cp_mem_range_delete_prep(void)
+{
+	RUN_PREP_CASES(cp_mem_range_delete_cases,
+			cs_nvme_cmds_prep_cp_mem_range_delete(&cmd,
+							      cp_mem_range_delete_cases[i].nsid,
+							      cp_mem_range_delete_cases[i].mrs_id));
+}
+
+static void
+test_slm_copy_lba_prep(void)
+{
+	for (size_t i = 0; i < sizeof(slm_copy_lba_cases) / sizeof(slm_copy_lba_cases[0]); i++) {
+		const slm_copy_lba_case *c = &slm_copy_lba_cases[i];
+		struct cs_nvme_cmd cmd;
+		struct cs_nvme_spec_slm_copy_desc_fmt23 desc;
+		char msg[160];
+
+		TEST_START(c->name);
+
+		cs_nvme_cmds_prep_slm_copy_lba(&cmd, c->dst_nsid, c->dst_addr, c->nbytes,
+					       c->desc_fmt);
+		if (!dwords_match(cmd.cdw, c->golden_cmd, 16, msg, sizeof(msg),
+				   "cmd (cs_nvme_cmds _prep)")) {
+			TEST_FAIL(msg);
+			continue;
+		}
+
+		cs_nvme_cmds_prep_slm_copy_lba_desc(&desc, c->src_nsid, c->slba, c->nlb);
+		_Static_assert(sizeof(desc) == 8 * sizeof(uint32_t),
+			       "cs_nvme_spec_slm_copy_desc_fmt23 must be 32 bytes");
+		if (!dwords_match((const uint32_t *)&desc, c->golden_desc, 8, msg, sizeof(msg),
+				   "desc (cs_nvme_cmds _prep)")) {
+			TEST_FAIL(msg);
+			continue;
+		}
+
+		TEST_PASS();
+	}
+}
+
 int
 main(void)
 {
 	printf("=== CP/SLM command-builder differential oracle ===\n");
-	printf("(commit 1/10 of the xNVMe-fork -> direct-SPDK port; see file header)\n\n");
+	printf("(commits 1-2/10 of the xNVMe-fork -> direct-SPDK port; see file header)\n\n");
 
 	test_opcode_enum_values();
 	test_cp_load();
@@ -608,6 +800,13 @@ main(void)
 	test_cp_mem_range();
 	test_cp_mem_range_delete();
 	test_slm_copy_lba();
+
+	test_cp_load_prep();
+	test_cp_activate_prep();
+	test_cp_execute_buf_prep();
+	test_cp_mem_range_prep();
+	test_cp_mem_range_delete_prep();
+	test_slm_copy_lba_prep();
 
 	TEST_SUMMARY();
 	return TEST_EXIT();

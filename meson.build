@@ -289,11 +289,26 @@ endif
 # CP/SLM command-builder differential oracle (dev-only; needs xNVMe headers
 # for the opcode/CSI enum cross-check, no device required). See
 # tests/test_cmd_oracle.c for the full commit-sequence context.
+#
+# Commit 2 adds src/backend/cs_nvme_cmds.c (the libcs-native CP/SLM command
+# builders) plus a test-only stub (tests/cs_nvme_spdk_test_stub.c) providing
+# the handful of transport symbols cs_nvme_cmds.c's public wrappers
+# reference but that aren't implemented until commit 3 (cs_nvme_spdk.c);
+# see that stub's file header. Neither cs_nvme_cmds.c nor the stub needs
+# xNVMe/SPDK to compile -- only the enum cross-check in test_cmd_oracle.c
+# itself does -- so this executable is still gated on xnvme_dep.found() as a
+# whole, kept simple rather than split into two differently-gated binaries;
+# that gate goes away in commit 6 when the xNVMe dependency is dropped and
+# commit 10 deletes this oracle outright.
 if xnvme_dep.found()
   test_cmd_oracle_exe = executable(
     'test_cmd_oracle',
-    'tests/test_cmd_oracle.c',
-    include_directories: include_directories('include'),
+    [
+      'tests/test_cmd_oracle.c',
+      'tests/cs_nvme_spdk_test_stub.c',
+      'src/backend/cs_nvme_cmds.c',
+    ],
+    include_directories: include_directories('include', 'src', 'src/backend'),
     dependencies: [thread_dep, xnvme_dep],
     install: false,
   )
