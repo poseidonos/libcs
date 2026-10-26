@@ -104,6 +104,41 @@ elif not get_option('sim_backend')
   error('No usable backend found. Build xNVMe or enable sim_backend.')
 endif
 
+# SPDK dependency discovery (commit 3/10 of the xNVMe -> direct-SPDK port,
+# see ~/.claude/plans/hidden-sprouting-turtle.md). pkg-config first
+# (spdk_nvme.pc / spdk_env_dpdk.pc, the eventual packaging-correct path once
+# SPDK ships them); falls back to a sibling SPDK build tree the way
+# sdc/build_all.sh's SPDK_DIR does (dev/CI convenience only, NOT a packaging
+# contract — tarball consumers must use pkg-config or -Dspdk_dir).
+#
+# This commit only needs `spdk_dep` to gate a compile-only check target
+# (cs_nvme_spdk_compile_check below); it is NOT added to libcs_deps or
+# lib_sources here — that is commit 4 (full pkg-config wiring + link flags)
+# and commit 5/6 (actually porting the backend onto it) territory.
+spdk_nvme_pc_dep = dependency('spdk_nvme', required: false)
+spdk_env_pc_dep = dependency('spdk_env_dpdk', required: false)
+
+if spdk_nvme_pc_dep.found() and spdk_env_pc_dep.found()
+  spdk_dep = declare_dependency(dependencies: [spdk_nvme_pc_dep, spdk_env_pc_dep, thread_dep])
+  message('Using SPDK via pkg-config (spdk_nvme.pc / spdk_env_dpdk.pc)')
+else
+  spdk_sibling_dir = get_option('spdk_dir') != '' \
+    ? get_option('spdk_dir') \
+    : meson.project_source_root() / '..' / 'spdk'
+  spdk_sibling_hdr = spdk_sibling_dir / 'include' / 'spdk' / 'nvme.h'
+
+  if run_command('test', '-f', spdk_sibling_hdr, check: false).returncode() == 0
+    spdk_dep = declare_dependency(
+      compile_args: ['-I' + spdk_sibling_dir / 'include'],
+      dependencies: [thread_dep],
+    )
+    message('Using SPDK headers from sibling tree: ' + spdk_sibling_dir
+            + ' (compile-only; no link-time archive resolution attempted by this commit)')
+  else
+    spdk_dep = dependency('', required: false)
+  endif
+endif
+
 # Include directories
 inc_dirs = include_directories('include', 'src')
 
@@ -330,6 +365,30 @@ test_compute_from_nvm_exe = executable(
 )
 
 
+# SPDK transport compile-only proof (commit 3/10, see
+# ~/.claude/plans/hidden-sprouting-turtle.md). Compiles cs_nvme_spdk.c +
+# cs_nvme_cmds.c against REAL SPDK headers -- not xNVMe's -- to catch any
+# signature/layout mismatch as early as possible. static_library() rather
+# than executable(): this commit does not attempt to resolve SPDK's
+# link-time symbols (that needs the whole-archive linker wrapping commit 4
+# adds), only to prove the translation unit compiles. A no-op (not an
+# error) wherever SPDK isn't available, per spdk_dep.found() below -- on
+# this macOS dev machine in particular, SPDK's own headers don't parse
+# (spdk/stdinc.h pulls in Linux-only sys/eventfd.h etc.), so spdk_dep is
+# never found here and this target is simply skipped.
+if spdk_dep.found()
+  cs_nvme_spdk_compile_check = static_library(
+    'cs_nvme_spdk_compile_check',
+    [
+      'src/backend/cs_nvme_spdk.c',
+      'src/backend/cs_nvme_cmds.c',
+    ],
+    include_directories: include_directories('include', 'src', 'src/backend'),
+    dependencies: [spdk_dep],
+    build_by_default: true,
+  )
+endif
+
 if get_option('sim_backend')
   subdir('benchmarks')
   subdir('examples')
@@ -340,6 +399,7 @@ summary({
   'Version': meson.project_version(),
   'Build type': get_option('buildtype'),
   'xNVMe backend': xnvme_dep.found(),
+  'SPDK transport (compile-check only, not linked)': spdk_dep.found(),
   'Simulator backend': get_option('sim_backend'),
   'ioctl backend': get_option('ioctl_backend'),
   'io_uring backend': get_option('io_uring_backend'),

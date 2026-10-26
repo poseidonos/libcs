@@ -25,3 +25,10 @@ option(
   value: false,
   description: 'Enable libnvme passthrough backend (requires libnvme, supports NVMe-oF)'
 )
+
+option(
+  'spdk_dir',
+  type: 'string',
+  value: '',
+  description: 'Sibling SPDK build tree to fall back to when spdk_nvme.pc / spdk_env_dpdk.pc are not found via pkg-config (dev convenience, e.g. ../spdk; mirrors sdc/build_all.sh SPDK_DIR). Not a packaging contract.'
+)
