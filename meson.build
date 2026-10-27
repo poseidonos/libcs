@@ -67,9 +67,11 @@ math_dep = cc.find_library('m', required: false)
 # As of commit 6/10 of the xNVMe -> direct-SPDK port the library does not
 # link xNVMe at all; `xnvme_dep` survives for exactly one consumer, the
 # CP/SLM command-builder differential oracle (tests/test_cmd_oracle.c),
-# which builds each of the 7 commands with BOTH the fork's builders and
-# cs_nvme_cmds.c's and memcmp's the 64-byte results. Commit 10 deletes the
-# oracle and this whole block with it.
+# which needs xNVMe headers for the opcode/CSI enum cross-check only
+# (compile-time _Static_assert), no device required — never links or invokes
+# the fork's real builder functions. The oracle compares hand-derived
+# "formula" and literal "golden" dword tables for the 6 CP/SLM commands
+# via memcmp. Commit 10 deletes the oracle and this whole block with it.
 #
 # Always use the sibling build (NOT system pkg-config) to avoid linking
 # against an outdated system libxnvme.so that may lack recent symbols
@@ -174,6 +176,80 @@ else
     spdk_link_dep = spdk_dep
     spdk_linkable = true
     message('Using SPDK via pkg-config (spdk_nvme.pc / spdk_env_dpdk.pc)')
+
+    # ── ELF-constructor self-registration (Linux, static SPDK) ──────────
+    # SPDK's NVMe transports (nvme_tcp, nvme_pcie, …) and socket
+    # implementations (spdk_sock_posix) register themselves from ELF
+    # constructors via SPDK_NVME_TRANSPORT_REGISTER / SPDK_SOCK_IMPL_REGISTER.
+    # Nothing in libcs references those constructors by symbol, so a
+    # demand-driven static link never extracts the archive members that hold
+    # them: the plain tier-1 link succeeds and produces a libcs.so with ZERO
+    # transports and ZERO sock implementations, which then dies at run time
+    # with "Cannot find any sock implementation for tcp" on the first
+    # spdk_nvme_probe(). Wrap exactly the two archives that carry the
+    # constructors in --whole-archive.
+    #
+    # Separately, spdk_nvme.pc / spdk_env_dpdk.pc have an EMPTY Libs.private
+    # and do not pull in SPDK's own system-library closure (isa-l,
+    # isa-l-crypto, openssl, libuuid, libnuma, …). SPDK ships that closure in
+    # a third .pc file, spdk_syslibs.pc, whose Libs.private carries the full
+    # list; without it a static link of libspdk_util / libspdk_nvme leaves
+    # crc16_t10dif / EVP_* / uuid_* undefined.
+    #
+    # Deliberately scoped to spdk_link_dep (the `cs` library target) and NOT
+    # to global c_link_args: whole-archiving the same archives into every
+    # test executable as well would double-register every transport at
+    # process start.
+    pkgconfig_exe = find_program('pkg-config', required: false)
+    if host_machine.system() == 'linux' and pkgconfig_exe.found()
+      spdk_pc_libdir = ''
+      foreach larg : run_command(pkgconfig_exe, '--libs-only-L', 'spdk_nvme',
+                                 check: true).stdout().strip().split()
+        if larg.startswith('-L')
+          spdk_pc_libdir = larg.substring(2)
+        endif
+      endforeach
+
+      spdk_ctor_archives = []
+      if spdk_pc_libdir != ''
+        foreach ctor_lib : ['libspdk_nvme.a', 'libspdk_sock_posix.a']
+          if run_command('test', '-f', spdk_pc_libdir / ctor_lib,
+                         check: false).returncode() == 0
+            spdk_ctor_archives += [spdk_pc_libdir / ctor_lib]
+          endif
+        endforeach
+      endif
+
+      if spdk_ctor_archives.length() > 0
+        spdk_pc_libs = run_command(pkgconfig_exe, '--libs',
+                                   'spdk_nvme', 'spdk_env_dpdk',
+                                   check: true).stdout().strip().split()
+
+        # spdk_syslibs.pc only exposes the system closure through
+        # Libs.private, which pkg-config emits for --static only.
+        spdk_syslibs_run = run_command(pkgconfig_exe, '--static', '--libs',
+                                       'spdk_syslibs', check: false)
+        spdk_syslibs_args = []
+        if spdk_syslibs_run.returncode() == 0
+          spdk_syslibs_args = spdk_syslibs_run.stdout().strip().split()
+        else
+          warning('spdk_syslibs.pc not found; falling back to a hardcoded '
+                  + 'system-library list for the SPDK static link')
+          spdk_syslibs_args = ['-lcrypto', '-lssl', '-luuid', '-lnuma',
+                               '-ldl', '-lrt', '-lm']
+        endif
+
+        spdk_link_dep = declare_dependency(
+          dependencies: [spdk_nvme_pc_dep, spdk_env_pc_dep, thread_dep],
+          link_args: ['-Wl,--no-as-needed', '-Wl,--whole-archive']
+                     + spdk_ctor_archives
+                     + ['-Wl,--no-whole-archive']
+                     + spdk_pc_libs + spdk_syslibs_args,
+        )
+        message('SPDK tier 1: whole-archive wrapping '
+                + ' '.join(spdk_ctor_archives))
+      endif
+    endif
   else
     spdk_sibling_hdr = spdk_sibling_dir / 'include' / 'spdk' / 'nvme.h'
     spdk_sibling_lib_dir = spdk_sibling_dir / 'build' / 'lib'
