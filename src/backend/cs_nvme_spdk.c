@@ -35,6 +35,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -316,7 +317,7 @@ xnvme_opts_default(void)
  * operation on this list holds g_cref_lock for its entire duration.
  */
 struct cref_entry {
-	char *uri;
+	char *key; /* full cache identity, see xnvme_dev_open() */
 	struct spdk_nvme_ctrlr *ctrlr;
 	int refcount;
 	struct cref_entry *next;
@@ -325,18 +326,18 @@ struct cref_entry {
 static pthread_mutex_t g_cref_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct cref_entry *g_cref_head = NULL;
 
-/* Look up an existing controller for `uri`; on hit, refcount++ and return
+/* Look up an existing controller for `key`; on hit, refcount++ and return
  * it. On miss, return NULL (caller must probe and call cref_insert()).
  */
 static struct spdk_nvme_ctrlr *
-cref_lookup_and_ref(const char *uri)
+cref_lookup_and_ref(const char *key)
 {
 	struct cref_entry *e;
 	struct spdk_nvme_ctrlr *ctrlr = NULL;
 
 	pthread_mutex_lock(&g_cref_lock);
 	for (e = g_cref_head; e; e = e->next) {
-		if (strcmp(e->uri, uri) == 0) {
+		if (strcmp(e->key, key) == 0) {
 			e->refcount++;
 			ctrlr = e->ctrlr;
 			break;
@@ -347,15 +348,15 @@ cref_lookup_and_ref(const char *uri)
 }
 
 static int
-cref_insert(const char *uri, struct spdk_nvme_ctrlr *ctrlr)
+cref_insert(const char *key, struct spdk_nvme_ctrlr *ctrlr)
 {
 	struct cref_entry *e = calloc(1, sizeof(*e));
 
 	if (!e) {
 		return -ENOMEM;
 	}
-	e->uri = strdup(uri);
-	if (!e->uri) {
+	e->key = strdup(key);
+	if (!e->key) {
 		free(e);
 		return -ENOMEM;
 	}
@@ -414,7 +415,7 @@ cref_deref(struct spdk_nvme_ctrlr *ctrlr)
 	pthread_mutex_unlock(&g_cref_lock);
 
 	if (victim) {
-		free(victim->uri);
+		free(victim->key);
 		free(victim);
 	}
 }
@@ -454,13 +455,56 @@ struct cs_nvme_queue {
 
 /* Local completion token passed as cb_arg to the raw submit calls. ctx has
  * no backend-reserved scratch field (cs_nvme.h is frozen), so we cannot
- * stash the "done" flag inside *ctx itself -- a stack-local struct plays
+ * stash the "done" flag inside *ctx itself -- a heap-allocated struct plays
  * the role xNVMe's ctx->be_rsvd[] private field does.
+ *
+ * HEAP, NOT STACK (S1 fix): on a timeout or a qpair/completion-poll error
+ * the command stays queued and its callback may fire much later -- on a
+ * different thread (admin completions) or during the next submit's
+ * completion poll. A stack-local token would make that late callback write
+ * into a dead stack frame. Refcounted: 1 reference for the in-flight
+ * command (dropped by sync_cmd_cb) + 1 for the submitting caller (dropped
+ * on return, whatever the outcome). Freed at zero. The one accepted leak:
+ * a qpair/controller that never delivers completions again leaves the
+ * in-flight reference dangling -- preferable to a use-after-free.
  */
 struct sync_completion {
 	struct cs_nvme_cmd_ctx *ctx;
 	volatile int done;
+	atomic_int refs;
 };
+
+static struct sync_completion *
+sync_completion_alloc(struct cs_nvme_cmd_ctx *ctx)
+{
+	struct sync_completion *sc = calloc(1, sizeof(*sc));
+
+	if (!sc) {
+		return NULL;
+	}
+	sc->ctx = ctx;
+	atomic_init(&sc->refs, 2); /* 1 caller + 1 in-flight */
+	return sc;
+}
+
+/* Drop one reference; frees at zero. Thread-safe: callable from the
+ * completion callback and from the submitting thread concurrently. */
+static void
+sync_completion_release(struct sync_completion *sc)
+{
+	if (atomic_fetch_sub_explicit(&sc->refs, 1, memory_order_acq_rel) == 1) {
+		free(sc);
+	}
+}
+
+/* Submit failed before the device ever saw the command: cancel the
+ * in-flight reference too. Call ONLY when no completion can ever arrive. */
+static void
+sync_completion_abort(struct sync_completion *sc)
+{
+	sync_completion_release(sc); /* cancel in-flight ref */
+	sync_completion_release(sc); /* caller ref */
+}
 
 static void
 sync_cmd_cb(void *cb_arg, const struct spdk_nvme_cpl *cpl)
@@ -469,6 +513,7 @@ sync_cmd_cb(void *cb_arg, const struct spdk_nvme_cpl *cpl)
 
 	sc->ctx->cpl = *(const struct cs_nvme_cpl *)cpl;
 	sc->done = 1;
+	sync_completion_release(sc); /* in-flight ref */
 }
 
 /* Async submit completion: write ctx->cpl, decrement queue->outstanding,
@@ -542,11 +587,15 @@ xnvme_cmd_pass(struct cs_nvme_cmd_ctx *ctx, void *dbuf, size_t dbuf_nbytes, void
 	 * completion lands.
 	 */
 	{
-		struct sync_completion sc = {.ctx = ctx, .done = 0};
+		struct sync_completion *sc = sync_completion_alloc(ctx);
 		int timeout_ms = get_command_timeout_ms();
 		struct timespec start;
 
+		if (!sc) {
+			return -ENOMEM;
+		}
 		if (!dev->sync_qpair) {
+			sync_completion_abort(sc);
 			return -EINVAL;
 		}
 
@@ -557,19 +606,24 @@ xnvme_cmd_pass(struct cs_nvme_cmd_ctx *ctx, void *dbuf, size_t dbuf_nbytes, void
 		pthread_mutex_lock(&dev->sync_lock);
 
 		rc = spdk_nvme_ctrlr_cmd_io_raw_with_md(dev->ctrlr, dev->sync_qpair,
-							 (struct spdk_nvme_cmd *)&ctx->cmd, dbuf,
-							 (uint32_t)dbuf_nbytes, mbuf, sync_cmd_cb,
-							 &sc);
+						         (struct spdk_nvme_cmd *)&ctx->cmd, dbuf,
+						         (uint32_t)dbuf_nbytes, mbuf, sync_cmd_cb,
+						         sc);
 		if (rc) {
 			pthread_mutex_unlock(&dev->sync_lock);
+			sync_completion_abort(sc);
 			return rc;
 		}
 
-		while (!sc.done) {
+		while (!sc->done) {
 			int32_t pr = spdk_nvme_qpair_process_completions(dev->sync_qpair, 0);
 
 			if (pr < 0) {
 				pthread_mutex_unlock(&dev->sync_lock);
+				/* Caller ref only; the in-flight ref is dropped
+				 * by the callback if the qpair ever delivers
+				 * again -- otherwise sc leaks (accepted). */
+				sync_completion_release(sc);
 				return (int)pr;
 			}
 			if (timeout_ms > 0 && elapsed_ms_since(&start) >= timeout_ms) {
@@ -577,10 +631,14 @@ xnvme_cmd_pass(struct cs_nvme_cmd_ctx *ctx, void *dbuf, size_t dbuf_nbytes, void
 					"xnvme_cmd_pass timed out after %dms (LIBCS_SPDK_COMMAND_TIMEOUT)",
 					timeout_ms);
 				pthread_mutex_unlock(&dev->sync_lock);
+				/* Caller ref only; the command stays queued and
+				 * its callback drops the in-flight ref later. */
+				sync_completion_release(sc);
 				return -ETIMEDOUT;
 			}
 		}
 
+		sync_completion_release(sc); /* caller ref (cb dropped in-flight) */
 		pthread_mutex_unlock(&dev->sync_lock);
 	}
 
@@ -592,7 +650,7 @@ xnvme_cmd_pass_admin(struct cs_nvme_cmd_ctx *ctx, void *dbuf, size_t dbuf_nbytes
 		     size_t mbuf_nbytes)
 {
 	struct cs_nvme_dev *dev = ctx ? ctx->dev : NULL;
-	struct sync_completion sc = {.ctx = ctx, .done = 0};
+	struct sync_completion *sc;
 	int timeout_ms;
 	struct timespec start;
 	int rc;
@@ -606,9 +664,15 @@ xnvme_cmd_pass_admin(struct cs_nvme_cmd_ctx *ctx, void *dbuf, size_t dbuf_nbytes
 		return -EINVAL;
 	}
 
+	sc = sync_completion_alloc(ctx);
+	if (!sc) {
+		return -ENOMEM;
+	}
+
 	rc = spdk_nvme_ctrlr_cmd_admin_raw(dev->ctrlr, (struct spdk_nvme_cmd *)&ctx->cmd, dbuf,
-					    (uint32_t)dbuf_nbytes, sync_cmd_cb, &sc);
+					    (uint32_t)dbuf_nbytes, sync_cmd_cb, sc);
 	if (rc) {
+		sync_completion_abort(sc);
 		return rc;
 	}
 
@@ -617,7 +681,7 @@ xnvme_cmd_pass_admin(struct cs_nvme_cmd_ctx *ctx, void *dbuf, size_t dbuf_nbytes
 		clock_gettime(CLOCK_MONOTONIC, &start);
 	}
 
-	while (!sc.done) {
+	while (!sc->done) {
 		/* FIX vs xnvme_be_spdk_admin.c:41-62 ("xnvme_be_spdk_sync_cmd_admin"
 		 * polls this in a while(!*completed) loop with NO check of
 		 * the int32_t return for negative -- can spin forever if the
@@ -626,16 +690,24 @@ xnvme_cmd_pass_admin(struct cs_nvme_cmd_ctx *ctx, void *dbuf, size_t dbuf_nbytes
 
 		if (pr < 0) {
 			CS_LOG_ERROR("spdk_nvme_ctrlr_process_admin_completions failed: %d", pr);
+			/* Caller ref only; admin completions are processed
+			 * process-wide, so a live controller still delivers
+			 * the callback and drops the in-flight ref later. */
+			sync_completion_release(sc);
 			return (int)pr;
 		}
 		if (timeout_ms > 0 && elapsed_ms_since(&start) >= timeout_ms) {
 			CS_LOG_ERROR(
 				"xnvme_cmd_pass_admin timed out after %dms (LIBCS_SPDK_COMMAND_TIMEOUT)",
 				timeout_ms);
+			/* Caller ref only; the command stays queued and its
+			 * callback drops the in-flight ref later. */
+			sync_completion_release(sc);
 			return -ETIMEDOUT;
 		}
 	}
 
+	sync_completion_release(sc);
 	return xnvme_cmd_ctx_cpl_status(ctx) ? -EIO : 0;
 }
 
@@ -645,7 +717,27 @@ struct identify_completion {
 	volatile int done;
 	uint16_t sc;
 	uint16_t sct;
+	atomic_int refs; /* same lifetime contract as sync_completion */
 };
+
+static struct identify_completion *
+identify_completion_alloc(void)
+{
+	struct identify_completion *ic = calloc(1, sizeof(*ic));
+
+	if (ic) {
+		atomic_init(&ic->refs, 2); /* 1 caller + 1 in-flight */
+	}
+	return ic;
+}
+
+static void
+identify_completion_release(struct identify_completion *ic)
+{
+	if (atomic_fetch_sub_explicit(&ic->refs, 1, memory_order_acq_rel) == 1) {
+		free(ic);
+	}
+}
 
 static void
 identify_cmd_cb(void *cb_arg, const struct spdk_nvme_cpl *cpl)
@@ -655,6 +747,7 @@ identify_cmd_cb(void *cb_arg, const struct spdk_nvme_cpl *cpl)
 	ic->sc = cpl->status.sc;
 	ic->sct = cpl->status.sct;
 	ic->done = 1;
+	identify_completion_release(ic); /* in-flight ref */
 }
 
 /* Raw Admin Identify (CNS in cdw10 bits 0-7, CSI in cdw11 bits 24-31 per the
@@ -671,7 +764,10 @@ admin_identify_raw(struct spdk_nvme_ctrlr *ctrlr, uint8_t cns, uint32_t nsid, ui
 		    void *buf, uint32_t buf_len)
 {
 	struct spdk_nvme_cmd cmd;
-	struct identify_completion ic = {0};
+	struct identify_completion *ic;
+	uint16_t sc, sct;
+	int timeout_ms;
+	struct timespec start;
 	int rc;
 
 	memset(&cmd, 0, sizeof(cmd));
@@ -680,19 +776,45 @@ admin_identify_raw(struct spdk_nvme_ctrlr *ctrlr, uint8_t cns, uint32_t nsid, ui
 	cmd.cdw10 = cns;
 	cmd.cdw11 = (uint32_t)csi << 24;
 
-	rc = spdk_nvme_ctrlr_cmd_admin_raw(ctrlr, &cmd, buf, buf_len, identify_cmd_cb, &ic);
+	ic = identify_completion_alloc();
+	if (!ic) {
+		return -ENOMEM;
+	}
+
+	rc = spdk_nvme_ctrlr_cmd_admin_raw(ctrlr, &cmd, buf, buf_len, identify_cmd_cb, ic);
 	if (rc) {
+		/* no completion can arrive: cancel both refs */
+		identify_completion_release(ic);
+		identify_completion_release(ic);
 		return rc;
 	}
 
-	while (!ic.done) {
+	timeout_ms = get_command_timeout_ms();
+	if (timeout_ms > 0) {
+		clock_gettime(CLOCK_MONOTONIC, &start);
+	}
+
+	while (!ic->done) {
 		int32_t pr = spdk_nvme_ctrlr_process_admin_completions(ctrlr);
 
 		if (pr < 0) {
+			identify_completion_release(ic); /* caller ref */
 			return (int)pr;
 		}
+		if (timeout_ms > 0 && elapsed_ms_since(&start) >= timeout_ms) {
+			CS_LOG_WARN("admin Identify timed out after %dms", timeout_ms);
+			/* caller ref only; dev_open's failure path releases the
+			 * controller, and the queued command's callback drops
+			 * the in-flight ref whenever it fires */
+			identify_completion_release(ic);
+			return -ETIMEDOUT;
+		}
 	}
-	if (ic.sc || ic.sct) {
+
+	sc = ic->sc;
+	sct = ic->sct;
+	identify_completion_release(ic);
+	if (sc || sct) {
 		return -EIO;
 	}
 	return 0;
@@ -897,24 +1019,42 @@ xnvme_dev_open(const char *dev_uri, struct cs_nvme_opts *opts)
 		return NULL;
 	}
 
-	ctrlr = cref_lookup_and_ref(dev_uri);
-	if (!ctrlr) {
-		struct probe_state ps = {.opts = opts, .is_fabrics = is_fabrics, .attached = NULL};
+	/* Cache identity: for fabrics the same host:port can front multiple
+	 * subsystems, so the URI alone is not a controller identity -- key the
+	 * cache on the full (uri, subnqn, adrfam) triple the trid was built
+	 * from. Local PCIe URIs are unique per device as-is. */
+	{
+		char cref_key[512];
 
-		rc = spdk_nvme_probe(&trid, &ps, probe_cb, attach_cb, NULL);
-		if (rc != 0 || !ps.attached) {
-			CS_LOG_ERROR("xnvme_dev_open: spdk_nvme_probe('%s') failed: rc=%d attached=%p",
-				     dev_uri, rc, (void *)ps.attached);
-			return NULL;
+		if (is_fabrics) {
+			snprintf(cref_key, sizeof(cref_key), "%s|%s|%s", dev_uri,
+				 opts->subnqn ? opts->subnqn : SPDK_NVMF_DISCOVERY_NQN,
+				 opts->adrfam ? opts->adrfam : "IPv4");
+		} else {
+			snprintf(cref_key, sizeof(cref_key), "%s", dev_uri);
 		}
-		ctrlr = ps.attached;
 
-		rc = cref_insert(dev_uri, ctrlr);
-		if (rc) {
-			spdk_nvme_detach(ctrlr);
-			return NULL;
+		ctrlr = cref_lookup_and_ref(cref_key);
+		if (!ctrlr) {
+			struct probe_state ps = {.opts = opts, .is_fabrics = is_fabrics,
+						 .attached = NULL};
+
+			rc = spdk_nvme_probe(&trid, &ps, probe_cb, attach_cb, NULL);
+			if (rc != 0 || !ps.attached) {
+				CS_LOG_ERROR(
+					"xnvme_dev_open: spdk_nvme_probe('%s') failed: rc=%d attached=%p",
+					dev_uri, rc, (void *)ps.attached);
+				return NULL;
+			}
+			ctrlr = ps.attached;
+
+			rc = cref_insert(cref_key, ctrlr);
+			if (rc) {
+				spdk_nvme_detach(ctrlr);
+				return NULL;
+			}
+			inserted = true;
 		}
-		inserted = true;
 	}
 
 	ns = spdk_nvme_ctrlr_get_ns(ctrlr, opts->nsid);
