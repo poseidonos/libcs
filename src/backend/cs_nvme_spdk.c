@@ -1,5 +1,6 @@
 /**
  * SPDX-FileCopyrightText: Samsung Electronics Co., Ltd
+ * SPDX-FileCopyrightText: xNVMe Project contributors (SPDK backend reference)
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
@@ -13,7 +14,10 @@
  * admin/IO submit, async queue lifecycle, DMA buffers, NVM read/write.
  *
  * Ground-truth reference: xnvme/lib/xnvme_be_spdk_{dev,tcp,sync,admin,async,
- * mem}.c. Three known bugs in that reference are deliberately NOT
+ * mem}.c (upstream xNVMe, BSD-3-Clause, https://github.com/xnvme/xnvme — this
+ * file is a re-implementation against upstream SPDK, not a copy; API surface
+ * was mirrored for call-site compatibility, with the internal design changed
+ * as noted below). Three known bugs in that reference are deliberately NOT
  * reproduced here -- see the comments at ensure_spdk_env_init(),
  * xnvme_cmd_pass_admin(), and the cref_* cache below.
  *
