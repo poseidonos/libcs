@@ -1,6 +1,7 @@
 build/
 build-dir/
 .cache/
+.omo/
 benchmark_results/
 .DS_Store
 *.o
